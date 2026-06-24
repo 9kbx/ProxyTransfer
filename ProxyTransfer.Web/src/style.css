@@ -175,6 +175,12 @@ td p,
   margin: 1.4rem 0;
 }
 
+.view-switcher {
+  display: flex;
+  gap: 0.8rem;
+  margin: 1.2rem 0 0;
+}
+
 .notice {
   margin: 0;
   padding: 0.95rem 1.15rem;
@@ -293,6 +299,11 @@ label span {
   background: rgba(83, 57, 24, 0.08);
 }
 
+.ghost.active {
+  color: #fff8ef;
+  background: linear-gradient(135deg, var(--accent-deep) 0%, var(--accent) 100%);
+}
+
 .ghost.danger {
   color: var(--danger);
   background: rgba(166, 59, 50, 0.1);
@@ -316,6 +327,21 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 1rem;
+}
+
+.batch-card.clickable {
+  cursor: pointer;
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.batch-card.clickable:hover {
+  transform: translateY(-1px);
+  border-color: rgba(191, 90, 42, 0.3);
+}
+
+.batch-card.selected {
+  border-color: rgba(191, 90, 42, 0.44);
+  box-shadow: 0 18px 44px rgba(141, 61, 25, 0.14);
 }
 
 .card-label {
@@ -420,7 +446,8 @@ th {
   }
 
   .notice-bar,
-  .copy-row {
+  .copy-row,
+  .view-switcher {
     flex-direction: column;
     align-items: stretch;
   }

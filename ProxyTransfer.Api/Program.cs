@@ -9,6 +9,18 @@ builder.Services.AddSingleton(static serviceProvider =>
     var options = serviceProvider.GetRequiredService<IOptions<ProxyTunnelHostOptions>>().Value;
     return new ProxyTunnelRegistry(options);
 });
+builder.Services.AddSingleton(static serviceProvider =>
+{
+    var options = serviceProvider.GetRequiredService<IOptions<ProxyTunnelHostOptions>>().Value;
+    return new UpstreamPoolRegistry(options);
+});
+builder.Services.AddSingleton(static serviceProvider =>
+{
+    var options = serviceProvider.GetRequiredService<IOptions<ProxyTunnelHostOptions>>().Value;
+    var upstreamPools = serviceProvider.GetRequiredService<UpstreamPoolRegistry>();
+    return new FixedProxyRegistry(options, upstreamPools);
+});
+builder.Services.AddHostedService<UpstreamProbeService>();
 builder.Services.AddCors(options =>
 {
     options.AddPolicy(
@@ -128,6 +140,91 @@ app.MapPost(
         {
             return Results.BadRequest(new { message = ex.Message });
         }
+    }
+);
+
+app.MapGet(
+    "/api/upstream-pools",
+    (UpstreamPoolRegistry registry) => Results.Ok(registry.ListPools())
+);
+
+app.MapGet(
+    "/api/upstream-pools/{poolId}",
+    (string poolId, UpstreamPoolRegistry registry) =>
+    {
+        try
+        {
+            return Results.Ok(registry.GetPool(poolId));
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            return Results.BadRequest(new { message = ex.Message });
+        }
+    }
+);
+
+app.MapPost(
+    "/api/upstream-pools/import",
+    (ImportUpstreamPoolRequest request, UpstreamPoolRegistry registry) =>
+    {
+        try
+        {
+            return Results.Ok(registry.Import(request));
+        }
+        catch (Exception ex)
+            when (ex is FormatException or InvalidOperationException or ArgumentException)
+        {
+            return Results.BadRequest(new { message = ex.Message });
+        }
+    }
+);
+
+app.MapGet("/api/fixed-proxies", (FixedProxyRegistry registry) => Results.Ok(registry.List()));
+
+app.MapPost(
+    "/api/fixed-proxies",
+    async (
+        FixedProxyRequest request,
+        FixedProxyRegistry registry,
+        CancellationToken cancellationToken
+    ) =>
+    {
+        try
+        {
+            var created = await registry.AddAsync(request, cancellationToken);
+            return Results.Ok(created);
+        }
+        catch (Exception ex)
+            when (ex is FormatException or InvalidOperationException or ArgumentException)
+        {
+            return Results.BadRequest(new { message = ex.Message });
+        }
+    }
+);
+
+app.MapPost(
+    "/api/fixed-proxies/{id:guid}/start",
+    async (Guid id, FixedProxyRegistry registry, CancellationToken cancellationToken) =>
+    {
+        try
+        {
+            var started = await registry.StartAsync(id, cancellationToken);
+            return started is null ? Results.NotFound() : Results.Ok(started);
+        }
+        catch (Exception ex)
+            when (ex is FormatException or InvalidOperationException or ArgumentException)
+        {
+            return Results.BadRequest(new { message = ex.Message });
+        }
+    }
+);
+
+app.MapPost(
+    "/api/fixed-proxies/{id:guid}/stop",
+    async (Guid id, FixedProxyRegistry registry) =>
+    {
+        var stopped = await registry.StopAsync(id);
+        return stopped is null ? Results.NotFound() : Results.Ok(stopped);
     }
 );
 

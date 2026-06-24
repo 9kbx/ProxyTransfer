@@ -58,14 +58,30 @@ dotnet run
 "TunnelHost": {
   "ListenAddress": "0.0.0.0",
   "PublicHost": "127.0.0.1",
-  "ApiUrl": "http://0.0.0.0:5080"
+  "ApiUrl": "http://0.0.0.0:5080",
+  "DefaultStickyMinutes": 10,
+  "FailureCooldownSeconds": 90,
+  "ProbeIntervalSeconds": 60,
+  "ProbeTimeoutSeconds": 10,
+  "ProbeTargetHost": "example.com",
+  "ProbeTargetPort": 443
 }
 ```
+
+新增字段说明：
+
+- `DefaultStickyMinutes`：固定下游代理入口默认粘性时长，单位分钟
+- `FailureCooldownSeconds`：某个上游连接失败后，被临时摘除的冷却时长，单位秒
+- `ProbeIntervalSeconds`：后台主动探活周期，单位秒
+- `ProbeTimeoutSeconds`：单次探活超时时间，单位秒
+- `ProbeTargetHost` / `ProbeTargetPort`：主动探活时尝试 CONNECT 的目标地址
 
 启动后可以先访问：
 
 - `http://127.0.0.1:5080/api/tunnels`
 - `http://127.0.0.1:5080/api/batches`
+- `http://127.0.0.1:5080/api/upstream-pools`
+- `http://127.0.0.1:5080/api/fixed-proxies`
 
 ### 2. 启动前端管理台
 
@@ -95,6 +111,30 @@ Vite 开发代理已经在 [ProxyTransfer.Web/vite.config.ts](ProxyTransfer.Web/
 - 一键复制全部运行中的下游代理，直接粘贴到 [ProxyTransfer.Tunnel.Test](ProxyTransfer.Tunnel.Test) 的 `proxy.txt`
 - 停止单个代理
 - 按导入批次批量停止
+- 切换到“固定入口池模式”页面，批量导入上游池
+- 为某个上游池创建固定下游代理入口，并查看池内健康状态与最近选中的上游
+
+### 3.2 固定入口池模式
+
+这个模式适合下面的交付方式：
+
+- 你只想给客户一个长期不变的下游代理地址，例如 `http://1.1.1.1:1234`
+- 客户端无需知道真实上游代理，也无需在上游变更时调整配置
+- 你希望由服务端在一批健康上游之间自动切换，并尽量保持同一个入口在一段时间内复用同一个上游
+
+工作方式如下：
+
+1. 先把一批 HTTP 或 SOCKS5 上游导入某个上游池
+2. 再创建一个固定下游代理入口，并把它绑定到这个上游池
+3. 客户端始终使用固定入口地址
+4. 服务端在每次新连接到来时，从池中选择一个当前健康的上游
+5. 在 `stickyMinutes` 粘性窗口内，固定入口会尽量复用最近成功的上游；如果该上游失效，则自动切换
+
+注意：
+
+- 固定的是“客户端配置的下游代理地址”
+- 不固定的是“目标网站最终看到的真实出口 IP”
+- 如果需要真正意义上的固定出口 IP，应给客户独享上游代理，或者把池规模控制得非常小并接受故障切换时 IP 变化
 
 ### 3.1 测试导入后的下游代理
 
@@ -222,6 +262,18 @@ user3:pass3@1.2.3.6:1080
 - 停止单个转发实例
 - 按批次号停止整批导入的代理
 
+### 固定入口池模式推荐流程
+
+如果你的目标是给客户交付一个固定地址，但希望系统自动切换健康上游，推荐按下面顺序操作：
+
+1. 启动 [ProxyTransfer.Api](ProxyTransfer.Api) 和 [ProxyTransfer.Web](ProxyTransfer.Web)
+2. 切换到管理台的“固定入口池模式”
+3. 批量导入一组 HTTP 或 SOCKS5 上游到某个池，例如 `pool-vip-a`
+4. 确认池内健康数大于 0
+5. 创建一个固定入口，指定 `PublicHost`、`ListenPort`、`DownstreamProtocol` 和可选的 `StickyMinutes`
+6. 把生成的 `forwardedProxy` 交给客户端长期使用
+7. 在池内健康状态表中观察主动探活结果和最近失败信息
+
 ### 推荐联调流程
 
 如果你的目标是把上游代理导入后尽快验证是否能交付给业务客户端，推荐按下面顺序操作：
@@ -247,6 +299,13 @@ user3:pass3@1.2.3.6:1080
 - `POST /api/tunnels/{id}/start`：启动指定代理
 - `POST /api/tunnels/{id}/stop`：停止指定代理
 - `POST /api/tunnels/stop-batch`：按批次停止
+- `GET /api/upstream-pools`：返回全部上游池概览
+- `GET /api/upstream-pools/{poolId}`：返回指定上游池详情与健康状态
+- `POST /api/upstream-pools/import`：批量导入上游池
+- `GET /api/fixed-proxies`：返回全部固定下游代理入口
+- `POST /api/fixed-proxies`：创建固定下游代理入口
+- `POST /api/fixed-proxies/{id}/start`：启动指定固定入口
+- `POST /api/fixed-proxies/{id}/stop`：停止指定固定入口
 
 ### `POST /api/tunnels/import`
 
@@ -309,6 +368,151 @@ user3:pass3@1.2.3.6:1080
   "batchId": "batch-a"
 }
 ```
+
+### `POST /api/upstream-pools/import`
+
+请求示例：
+
+```json
+{
+  "proxyText": "http://user:pass@2.2.2.2:8080\nsocks5://user:pass@2.2.2.3:1080",
+  "poolId": "pool-vip-a",
+  "note": "VIP 客户 A 的候选上游池"
+}
+```
+
+说明：
+
+- `proxyText`：每行一个上游代理，支持 HTTP 和 SOCKS5
+- `poolId`：可选；留空时自动生成
+- `note`：可选；用于前端显示和运维备注
+
+响应示例：
+
+```json
+{
+  "poolId": "pool-vip-a",
+  "importedCount": 2,
+  "totalCount": 2,
+  "items": [
+    {
+      "id": "d4b9bf52-ec0c-4d8f-9c55-95e8beef40d1",
+      "poolId": "pool-vip-a",
+      "proxy": "http://2.2.2.2:8080",
+      "proxyDisplay": "http://user:***@2.2.2.2:8080",
+      "status": "Unknown",
+      "failureCount": 0,
+      "createdAt": "2026-06-24T08:30:00+00:00",
+      "lastCheckedAt": null,
+      "lastSuccessAt": null,
+      "lastFailureAt": null,
+      "disabledUntil": null,
+      "lastError": null
+    }
+  ]
+}
+```
+
+### `GET /api/upstream-pools/{poolId}`
+
+响应示例：
+
+```json
+{
+  "poolId": "pool-vip-a",
+  "note": "VIP 客户 A 的候选上游池",
+  "totalCount": 6,
+  "healthyCount": 4,
+  "createdAt": "2026-06-24T08:30:00+00:00",
+  "updatedAt": "2026-06-24T08:45:00+00:00",
+  "items": [
+    {
+      "id": "d4b9bf52-ec0c-4d8f-9c55-95e8beef40d1",
+      "poolId": "pool-vip-a",
+      "proxy": "socks5://2.2.2.3:1080",
+      "proxyDisplay": "socks5://user:***@2.2.2.3:1080",
+      "status": "Healthy",
+      "failureCount": 0,
+      "createdAt": "2026-06-24T08:30:00+00:00",
+      "lastCheckedAt": "2026-06-24T08:44:55+00:00",
+      "lastSuccessAt": "2026-06-24T08:44:55+00:00",
+      "lastFailureAt": null,
+      "disabledUntil": null,
+      "lastError": null
+    }
+  ]
+}
+```
+
+### `POST /api/fixed-proxies`
+
+请求示例：
+
+```json
+{
+  "poolId": "pool-vip-a",
+  "downstreamProtocol": "http",
+  "note": "客户 A 固定入口",
+  "listenAddress": "0.0.0.0",
+  "publicHost": "1.1.1.1",
+  "listenPort": 1234,
+  "stickyMinutes": 10,
+  "autoStart": true
+}
+```
+
+说明：
+
+- `poolId`：固定入口绑定到哪个上游池
+- `downstreamProtocol`：对外暴露为 `http` 或 `socks5`
+- `listenPort`：可选；不填则随机端口
+- `stickyMinutes`：固定入口优先复用最近成功上游的时长，单位分钟
+- `autoStart`：是否创建后立即启动
+
+响应示例：
+
+```json
+{
+  "id": "5dcb7df6-7e37-47dc-8d11-31285021bc8c",
+  "poolId": "pool-vip-a",
+  "note": "客户 A 固定入口",
+  "downstreamProtocol": "http",
+  "listenAddress": "0.0.0.0",
+  "publicHost": "1.1.1.1",
+  "requestedListenPort": 1234,
+  "activeListenPort": 1234,
+  "forwardedProxy": "http://1.1.1.1:1234",
+  "selectionPolicy": "sticky",
+  "stickyMinutes": 10,
+  "totalUpstreamCount": 6,
+  "healthyUpstreamCount": 4,
+  "lastSelectedUpstream": "socks5://2.2.2.3:1080",
+  "lastSelectedUpstreamDisplay": "socks5://user:***@2.2.2.3:1080",
+  "status": "Running",
+  "createdAt": "2026-06-24T08:46:00+00:00",
+  "startedAt": "2026-06-24T08:46:00+00:00",
+  "stoppedAt": null,
+  "lastError": null
+}
+```
+
+### `GET /api/fixed-proxies`
+
+这个接口会返回当前所有固定入口及其最近选中的上游摘要。前端“固定入口池模式”页面就是基于它来展示：
+
+- 当前固定入口地址
+- 绑定的上游池
+- 当前健康上游数
+- 最近一次选中的上游
+- 当前状态、错误信息和启动/停止时间
+
+### `POST /api/fixed-proxies/{id}/start`
+
+这个接口当前不需要请求体，直接启动已创建的固定入口。
+
+### `POST /api/fixed-proxies/{id}/stop`
+
+这个接口当前不需要请求体，直接停止指定固定入口。
 
 ## 各项目的作用
 

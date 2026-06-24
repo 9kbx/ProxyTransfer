@@ -7,4 +7,16 @@ public sealed class ProxyTunnelHostOptions
     public string PublicHost { get; set; } = "127.0.0.1";
 
     public string ApiUrl { get; set; } = "http://0.0.0.0:5080";
+
+    public int DefaultStickyMinutes { get; set; } = 10;
+
+    public int FailureCooldownSeconds { get; set; } = 90;
+
+    public int ProbeIntervalSeconds { get; set; } = 60;
+
+    public int ProbeTimeoutSeconds { get; set; } = 10;
+
+    public string ProbeTargetHost { get; set; } = "example.com";
+
+    public int ProbeTargetPort { get; set; } = 443;
 }
