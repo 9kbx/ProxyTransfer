@@ -9,7 +9,9 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
 {
     private const string HttpDownstreamProtocol = "http";
     private const string Socks5DownstreamProtocol = "socks5";
-    private const string SelectionPolicy = "sticky";
+    private const string StickySelectionPolicy = "sticky";
+    private const string RoundRobinSelectionPolicy = "round-robin";
+    private const string LeastFailuresSelectionPolicy = "least-failures";
 
     private readonly ConcurrentDictionary<Guid, FixedProxyEntry> _entries = new();
     private readonly ProxyTunnelHostOptions _options;
@@ -53,6 +55,7 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
             ResolveListenAddress(request.ListenAddress),
             ResolvePublicHost(request.PublicHost),
             request.ListenPort ?? 0,
+            ResolveSelectionPolicy(request.SelectionPolicy),
             ResolveStickyMinutes(request.StickyMinutes)
         );
 
@@ -116,7 +119,7 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
             try
             {
                 var listenAddress = IPAddress.Parse(entry.ListenAddress);
-                var router = new StickyUpstreamRouter(entry, _upstreamPools);
+                var router = CreateRouter(entry);
                 entry.Tunnel = await CreateTunnelAsync(
                         entry,
                         router,
@@ -281,6 +284,34 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
         return value;
     }
 
+    private string ResolveSelectionPolicy(string? candidate)
+    {
+        var value = string.IsNullOrWhiteSpace(candidate)
+            ? StickySelectionPolicy
+            : candidate.Trim().ToLowerInvariant();
+
+        return value switch
+        {
+            StickySelectionPolicy => value,
+            RoundRobinSelectionPolicy => value,
+            LeastFailuresSelectionPolicy => value,
+            _ => throw new FormatException($"不支持的上游选择策略: {candidate}"),
+        };
+    }
+
+    private IUpstreamRouter CreateRouter(FixedProxyEntry entry)
+    {
+        return entry.SelectionPolicy switch
+        {
+            StickySelectionPolicy => new StickyUpstreamRouter(entry, _upstreamPools),
+            RoundRobinSelectionPolicy => new RoundRobinUpstreamRouter(entry, _upstreamPools),
+            LeastFailuresSelectionPolicy => new LeastFailuresUpstreamRouter(entry, _upstreamPools),
+            _ => throw new InvalidOperationException(
+                $"未知的上游选择策略: {entry.SelectionPolicy}"
+            ),
+        };
+    }
+
     private enum FixedProxyStatus
     {
         Created,
@@ -299,6 +330,7 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
             string listenAddress,
             string publicHost,
             int requestedListenPort,
+            string selectionPolicy,
             int stickyMinutes
         )
         {
@@ -309,6 +341,7 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
             ListenAddress = listenAddress;
             PublicHost = publicHost;
             RequestedListenPort = requestedListenPort;
+            SelectionPolicy = selectionPolicy;
             StickyMinutes = stickyMinutes;
             CreatedAt = DateTimeOffset.UtcNow;
             Status = FixedProxyStatus.Created;
@@ -327,6 +360,8 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
         public string PublicHost { get; }
 
         public int RequestedListenPort { get; }
+
+        public string SelectionPolicy { get; }
 
         public int ActiveListenPort { get; set; }
 
@@ -457,6 +492,117 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
             {
                 _entry.LastLease = null;
                 _entry.LastLeaseExpiresAt = null;
+            }
+
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class RoundRobinUpstreamRouter : IUpstreamRouter
+    {
+        private readonly FixedProxyEntry _entry;
+        private readonly UpstreamPoolRegistry _upstreamPools;
+
+        public RoundRobinUpstreamRouter(FixedProxyEntry entry, UpstreamPoolRegistry upstreamPools)
+        {
+            _entry = entry;
+            _upstreamPools = upstreamPools;
+        }
+
+        public ValueTask<UpstreamLease> SelectAsync(
+            ProxyConnectRequest request,
+            CancellationToken cancellationToken
+        )
+        {
+            _ = request;
+            _ = cancellationToken;
+
+            var lease = _upstreamPools.AcquireRoundRobin(_entry.PoolId);
+            _entry.LastLease = lease;
+            _entry.LastLeaseExpiresAt = null;
+            _entry.LastSelectedUpstreamDisplay = _upstreamPools.GetSafeDisplay(lease.UpstreamId);
+            return ValueTask.FromResult(lease);
+        }
+
+        public ValueTask ReportSuccessAsync(
+            UpstreamLease lease,
+            CancellationToken cancellationToken
+        )
+        {
+            _ = cancellationToken;
+            _upstreamPools.MarkSuccess(_entry.PoolId, lease.UpstreamId);
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask ReportFailureAsync(
+            UpstreamLease lease,
+            Exception exception,
+            CancellationToken cancellationToken
+        )
+        {
+            _ = cancellationToken;
+            _upstreamPools.MarkFailure(_entry.PoolId, lease.UpstreamId, exception);
+
+            if (_entry.LastLease?.UpstreamId == lease.UpstreamId)
+            {
+                _entry.LastLease = null;
+            }
+
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class LeastFailuresUpstreamRouter : IUpstreamRouter
+    {
+        private readonly FixedProxyEntry _entry;
+        private readonly UpstreamPoolRegistry _upstreamPools;
+
+        public LeastFailuresUpstreamRouter(
+            FixedProxyEntry entry,
+            UpstreamPoolRegistry upstreamPools
+        )
+        {
+            _entry = entry;
+            _upstreamPools = upstreamPools;
+        }
+
+        public ValueTask<UpstreamLease> SelectAsync(
+            ProxyConnectRequest request,
+            CancellationToken cancellationToken
+        )
+        {
+            _ = request;
+            _ = cancellationToken;
+
+            var lease = _upstreamPools.AcquireLeastFailures(_entry.PoolId);
+            _entry.LastLease = lease;
+            _entry.LastLeaseExpiresAt = null;
+            _entry.LastSelectedUpstreamDisplay = _upstreamPools.GetSafeDisplay(lease.UpstreamId);
+            return ValueTask.FromResult(lease);
+        }
+
+        public ValueTask ReportSuccessAsync(
+            UpstreamLease lease,
+            CancellationToken cancellationToken
+        )
+        {
+            _ = cancellationToken;
+            _upstreamPools.MarkSuccess(_entry.PoolId, lease.UpstreamId);
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask ReportFailureAsync(
+            UpstreamLease lease,
+            Exception exception,
+            CancellationToken cancellationToken
+        )
+        {
+            _ = cancellationToken;
+            _upstreamPools.MarkFailure(_entry.PoolId, lease.UpstreamId, exception);
+
+            if (_entry.LastLease?.UpstreamId == lease.UpstreamId)
+            {
+                _entry.LastLease = null;
             }
 
             return ValueTask.CompletedTask;

@@ -168,12 +168,35 @@ type ProxyTestResult = {
 }
 
 type ViewMode = 'classic' | 'fixed'
+type SelectionPolicy = 'sticky' | 'round-robin' | 'least-failures'
 
 type FloatingNavItem = {
   id: string
   label: string
   shortLabel: string
 }
+
+const selectionPolicyOptions: Array<{
+  value: SelectionPolicy
+  label: string
+  description: string
+}> = [
+  {
+    value: 'sticky',
+    label: '粘性会话',
+    description: '在设定时间窗内尽量复用最近成功的上游。',
+  },
+  {
+    value: 'round-robin',
+    label: '轮询',
+    description: '每个新连接在健康上游之间依次轮换。',
+  },
+  {
+    value: 'least-failures',
+    label: '最少失败优先',
+    description: '优先选择当前失败次数更少的健康上游。',
+  },
+]
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 
@@ -210,6 +233,7 @@ const upstreamPoolForm = reactive({
 const fixedProxyForm = reactive({
   poolId: '',
   downstreamProtocol: 'http',
+  selectionPolicy: 'sticky' as SelectionPolicy,
   note: '',
   listenAddress: '0.0.0.0',
   publicHost: '',
@@ -340,8 +364,20 @@ const fixedProxyHint = computed(() => {
     return '先导入上游池，再把固定入口绑定到某个池。'
   }
 
+  if (fixedProxyForm.selectionPolicy === 'round-robin') {
+    return `固定入口地址保持不变，系统会从池 ${fixedProxyForm.poolId} 中按轮询依次分配健康上游。`
+  }
+
+  if (fixedProxyForm.selectionPolicy === 'least-failures') {
+    return `固定入口地址保持不变，系统会优先从池 ${fixedProxyForm.poolId} 中选择失败次数更少的健康上游。`
+  }
+
   return `固定入口地址保持不变，系统会从池 ${fixedProxyForm.poolId} 中按粘性会话动态切换健康上游。`
 })
+
+function formatSelectionPolicy(policy: string | null | undefined): string {
+  return selectionPolicyOptions.find((item) => item.value === policy)?.label ?? (policy || '未知')
+}
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
@@ -612,6 +648,7 @@ async function addFixedProxy() {
       body: JSON.stringify({
         poolId: fixedProxyForm.poolId,
         downstreamProtocol: fixedProxyForm.downstreamProtocol,
+        selectionPolicy: fixedProxyForm.selectionPolicy,
         note: fixedProxyForm.note || null,
         listenAddress: fixedProxyForm.listenAddress || null,
         publicHost: fixedProxyForm.publicHost || null,
@@ -1254,7 +1291,7 @@ onMounted(async () => {
         <section id="fixed-create" class="panel scroll-section">
           <div class="panel-head">
             <h2>创建固定下游代理入口</h2>
-            <p>客户端始终使用这个固定地址；服务端会在上游池内按粘性会话复用健康代理，故障时自动切换。</p>
+            <p>客户端始终使用这个固定地址；服务端会在上游池内按粘性会话、轮询或最少失败优先策略选择健康上游。</p>
           </div>
 
           <div class="form-grid">
@@ -1276,6 +1313,17 @@ onMounted(async () => {
               </select>
             </label>
             <label>
+              <span>上游选择策略</span>
+              <select v-model="fixedProxyForm.selectionPolicy">
+                <option v-for="item in selectionPolicyOptions" :key="item.value" :value="item.value">
+                  {{ item.label }}
+                </option>
+              </select>
+              <small class="field-help">
+                {{ selectionPolicyOptions.find((item) => item.value === fixedProxyForm.selectionPolicy)?.description }}
+              </small>
+            </label>
+            <label>
               <span>监听地址</span>
               <input v-model="fixedProxyForm.listenAddress" placeholder="0.0.0.0" />
             </label>
@@ -1290,6 +1338,7 @@ onMounted(async () => {
             <label>
               <span>粘性分钟数</span>
               <input v-model="fixedProxyForm.stickyMinutes" type="number" min="1" max="1440" />
+              <small class="field-help">仅粘性会话策略使用这个时间窗；其他策略会忽略它。</small>
             </label>
             <label>
               <span>备注</span>
@@ -1500,8 +1549,9 @@ onMounted(async () => {
                   <p>下游协议: {{ item.downstreamProtocol.toUpperCase() }}</p>
                 </td>
                 <td>
-                  <p>策略: {{ item.selectionPolicy }}</p>
-                  <p>粘性: {{ item.stickyMinutes }} 分钟</p>
+                  <p>策略: {{ formatSelectionPolicy(item.selectionPolicy) }}</p>
+                  <p v-if="item.selectionPolicy === 'sticky'">粘性: {{ item.stickyMinutes }} 分钟</p>
+                  <p v-else>粘性窗口: 不使用</p>
                   <p>最近上游: {{ item.lastSelectedUpstreamDisplay ?? '尚未选择' }}</p>
                 </td>
                 <td>

@@ -135,6 +135,7 @@ public sealed record FixedProxyRequest(
     string? ListenAddress,
     string? PublicHost,
     int? ListenPort,
+    string? SelectionPolicy,
     int? StickyMinutes,
     bool AutoStart = true
 );

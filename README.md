@@ -112,7 +112,7 @@ Vite 开发代理已经在 [ProxyTransfer.Web/vite.config.ts](ProxyTransfer.Web/
 - 停止单个代理
 - 按导入批次批量停止
 - 切换到“固定入口池模式”页面，批量导入上游池
-- 为某个上游池创建固定下游代理入口，并查看池内健康状态与最近选中的上游
+- 为某个上游池创建固定下游代理入口，并查看池内健康状态、选择策略与最近选中的上游
 
 ### 3.2 固定入口池模式
 
@@ -120,7 +120,7 @@ Vite 开发代理已经在 [ProxyTransfer.Web/vite.config.ts](ProxyTransfer.Web/
 
 - 你只想给客户一个长期不变的下游代理地址，例如 `http://1.1.1.1:1234`
 - 客户端无需知道真实上游代理，也无需在上游变更时调整配置
-- 你希望由服务端在一批健康上游之间自动切换，并尽量保持同一个入口在一段时间内复用同一个上游
+- 你希望由服务端在一批健康上游之间自动切换，并可按粘性会话、轮询或最少失败优先三种策略进行选择
 
 工作方式如下：
 
@@ -128,7 +128,9 @@ Vite 开发代理已经在 [ProxyTransfer.Web/vite.config.ts](ProxyTransfer.Web/
 2. 再创建一个固定下游代理入口，并把它绑定到这个上游池
 3. 客户端始终使用固定入口地址
 4. 服务端在每次新连接到来时，从池中选择一个当前健康的上游
-5. 在 `stickyMinutes` 粘性窗口内，固定入口会尽量复用最近成功的上游；如果该上游失效，则自动切换
+5. 如果策略是 `sticky`，在 `stickyMinutes` 粘性窗口内，固定入口会尽量复用最近成功的上游；如果该上游失效，则自动切换
+6. 如果策略是 `round-robin`，每个新连接会在当前健康上游之间顺序轮换
+7. 如果策略是 `least-failures`，每个新连接会优先选择当前失败次数更少的健康上游
 
 注意：
 
@@ -456,6 +458,7 @@ user3:pass3@1.2.3.6:1080
   "listenAddress": "0.0.0.0",
   "publicHost": "1.1.1.1",
   "listenPort": 1234,
+  "selectionPolicy": "sticky",
   "stickyMinutes": 10,
   "autoStart": true
 }
@@ -466,7 +469,8 @@ user3:pass3@1.2.3.6:1080
 - `poolId`：固定入口绑定到哪个上游池
 - `downstreamProtocol`：对外暴露为 `http` 或 `socks5`
 - `listenPort`：可选；不填则随机端口
-- `stickyMinutes`：固定入口优先复用最近成功上游的时长，单位分钟
+- `selectionPolicy`：上游选择策略，支持 `sticky`、`round-robin`、`least-failures`
+- `stickyMinutes`：固定入口优先复用最近成功上游的时长，单位分钟；仅 `sticky` 策略使用
 - `autoStart`：是否创建后立即启动
 
 响应示例：

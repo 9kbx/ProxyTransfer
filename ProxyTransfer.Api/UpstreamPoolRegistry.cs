@@ -105,12 +105,29 @@ public sealed class UpstreamPoolRegistry
         var pool = GetPoolEntry(poolId);
         lock (pool.SyncRoot)
         {
-            var now = DateTimeOffset.UtcNow;
-            var candidates = pool
-                .Items.Where(item => item.DisabledUntil is null || item.DisabledUntil <= now)
+            var candidates = GetHealthyCandidates(pool);
+            if (candidates.Length == 0)
+            {
+                throw new InvalidOperationException($"上游池 {poolId} 当前没有可用代理。");
+            }
+
+            candidates = candidates
                 .OrderBy(static item => item.FailureCount)
                 .ThenBy(static item => item.LastSuccessAt ?? item.CreatedAt)
                 .ToArray();
+
+            pool.NextIndex = (pool.NextIndex + 1) % candidates.Length;
+            var selected = candidates[pool.NextIndex];
+            return new UpstreamLease(selected.Id, selected.Endpoint);
+        }
+    }
+
+    public UpstreamLease AcquireRoundRobin(string poolId)
+    {
+        var pool = GetPoolEntry(poolId);
+        lock (pool.SyncRoot)
+        {
+            var candidates = GetHealthyCandidates(pool);
 
             if (candidates.Length == 0)
             {
@@ -119,6 +136,27 @@ public sealed class UpstreamPoolRegistry
 
             pool.NextIndex = (pool.NextIndex + 1) % candidates.Length;
             var selected = candidates[pool.NextIndex];
+            return new UpstreamLease(selected.Id, selected.Endpoint);
+        }
+    }
+
+    public UpstreamLease AcquireLeastFailures(string poolId)
+    {
+        var pool = GetPoolEntry(poolId);
+        lock (pool.SyncRoot)
+        {
+            var candidates = GetHealthyCandidates(pool)
+                .OrderBy(static item => item.FailureCount)
+                .ThenByDescending(static item => item.LastSuccessAt ?? item.CreatedAt)
+                .ThenBy(static item => item.Id)
+                .ToArray();
+
+            if (candidates.Length == 0)
+            {
+                throw new InvalidOperationException($"上游池 {poolId} 当前没有可用代理。");
+            }
+
+            var selected = candidates[0];
             return new UpstreamLease(selected.Id, selected.Endpoint);
         }
     }
@@ -181,6 +219,14 @@ public sealed class UpstreamPoolRegistry
         }
 
         return null;
+    }
+
+    private static UpstreamProxyEntry[] GetHealthyCandidates(UpstreamPoolEntry pool)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return pool
+            .Items.Where(item => item.DisabledUntil is null || item.DisabledUntil <= now)
+            .ToArray();
     }
 
     public IReadOnlyList<(string PoolId, Guid UpstreamId, ProxyEndpoint Endpoint)> GetProbeTargets()
