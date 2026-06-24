@@ -6,6 +6,9 @@ namespace ProxyTransfer.Api;
 
 public sealed class ProxyTunnelRegistry : IAsyncDisposable
 {
+    private const string HttpDownstreamProtocol = "http";
+    private const string Socks5DownstreamProtocol = "socks5";
+
     private readonly ConcurrentDictionary<Guid, TunnelEntry> _entries = new();
     private readonly ProxyTunnelHostOptions _defaults;
 
@@ -73,6 +76,7 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
             var created = await AddAsync(
                     new AddProxyRequest(
                         lines[index],
+                        request.DownstreamProtocol,
                         request.Note,
                         batchId,
                         request.ListenAddress,
@@ -101,6 +105,7 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
             string.IsNullOrWhiteSpace(request.BatchId) ? null : request.BatchId.Trim(),
             request.Note?.Trim(),
             remoteProxy,
+            ResolveDownstreamProtocol(request.DownstreamProtocol, remoteProxy),
             ResolveListenAddress(request.ListenAddress),
             ResolvePublicHost(request.PublicHost),
             request.ListenPort ?? 0
@@ -132,6 +137,11 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
 
         if (request is not null)
         {
+            entry.DownstreamProtocol = ResolveDownstreamProtocol(
+                request.DownstreamProtocol,
+                entry.RemoteProxy,
+                entry.DownstreamProtocol
+            );
             entry.ListenAddress = ResolveListenAddress(request.ListenAddress, entry.ListenAddress);
             entry.PublicHost = ResolvePublicHost(request.PublicHost, entry.PublicHost);
             entry.RequestedListenPort = request.ListenPort ?? entry.RequestedListenPort;
@@ -196,14 +206,7 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
             try
             {
                 var listenAddress = IPAddress.Parse(entry.ListenAddress);
-                entry.Tunnel = await Socks5ProxyTunnel
-                    .StartAsync(
-                        entry.RemoteProxy,
-                        listenAddress,
-                        entry.RequestedListenPort,
-                        entry.PublicHost,
-                        cancellationToken
-                    )
+                entry.Tunnel = await CreateTunnelAsync(entry, listenAddress, cancellationToken)
                     .ConfigureAwait(false);
 
                 entry.ActiveListenPort = entry.Tunnel.LocalPort;
@@ -278,6 +281,92 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
         return value;
     }
 
+    private static string ResolveDownstreamProtocol(
+        string? candidate,
+        ProxyEndpoint remoteProxy,
+        string? fallback = null
+    )
+    {
+        var value = string.IsNullOrWhiteSpace(candidate)
+            ? (string.IsNullOrWhiteSpace(fallback) ? HttpDownstreamProtocol : fallback)
+            : candidate.Trim().ToLowerInvariant();
+
+        if (value == HttpDownstreamProtocol)
+        {
+            return value;
+        }
+
+        if (value == Socks5DownstreamProtocol)
+        {
+            if (!remoteProxy.IsSocks5)
+            {
+                throw new InvalidOperationException("下游 SOCKS5 出口仅支持 SOCKS5 上游代理。");
+            }
+
+            return value;
+        }
+
+        throw new FormatException($"不支持的下游出口协议: {candidate}");
+    }
+
+    private static Task<IProxyTunnel> CreateTunnelAsync(
+        TunnelEntry entry,
+        IPAddress listenAddress,
+        CancellationToken cancellationToken
+    )
+    {
+        return entry.DownstreamProtocol switch
+        {
+            HttpDownstreamProtocol => CreateHttpTunnelAsync(
+                entry,
+                listenAddress,
+                cancellationToken
+            ),
+            Socks5DownstreamProtocol => CreateSocks5TunnelAsync(
+                entry,
+                listenAddress,
+                cancellationToken
+            ),
+            _ => throw new InvalidOperationException(
+                $"未知的下游出口协议: {entry.DownstreamProtocol}"
+            ),
+        };
+    }
+
+    private static async Task<IProxyTunnel> CreateHttpTunnelAsync(
+        TunnelEntry entry,
+        IPAddress listenAddress,
+        CancellationToken cancellationToken
+    )
+    {
+        return await Socks5ToHttpTunnel
+            .StartAsync(
+                entry.RemoteProxy,
+                listenAddress,
+                entry.RequestedListenPort,
+                entry.PublicHost,
+                cancellationToken
+            )
+            .ConfigureAwait(false);
+    }
+
+    private static async Task<IProxyTunnel> CreateSocks5TunnelAsync(
+        TunnelEntry entry,
+        IPAddress listenAddress,
+        CancellationToken cancellationToken
+    )
+    {
+        return await Socks5ToSocks5Tunnel
+            .StartAsync(
+                entry.RemoteProxy,
+                listenAddress,
+                entry.RequestedListenPort,
+                entry.PublicHost,
+                cancellationToken
+            )
+            .ConfigureAwait(false);
+    }
+
     private enum TunnelStatus
     {
         Created,
@@ -293,6 +382,7 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
             string? batchId,
             string? note,
             ProxyEndpoint remoteProxy,
+            string downstreamProtocol,
             string listenAddress,
             string publicHost,
             int requestedListenPort
@@ -302,6 +392,7 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
             BatchId = batchId;
             Note = note;
             RemoteProxy = remoteProxy;
+            DownstreamProtocol = downstreamProtocol;
             ListenAddress = listenAddress;
             PublicHost = publicHost;
             RequestedListenPort = requestedListenPort;
@@ -316,6 +407,8 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
         public string? Note { get; }
 
         public ProxyEndpoint RemoteProxy { get; }
+
+        public string DownstreamProtocol { get; set; }
 
         public DateTimeOffset CreatedAt { get; }
 
@@ -335,15 +428,14 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
 
         public string? LastError { get; set; }
 
-        public Socks5ProxyTunnel? Tunnel { get; set; }
+        public IProxyTunnel? Tunnel { get; set; }
 
         public SemaphoreSlim Gate { get; } = new(1, 1);
 
         public ProxyTunnelResponse ToResponse()
         {
             var forwardedPort = Tunnel?.LocalPort ?? ActiveListenPort;
-            var forwardedProxy =
-                forwardedPort > 0 ? $"http://{FormatHost(PublicHost)}:{forwardedPort}" : null;
+            var forwardedProxy = forwardedPort > 0 ? BuildForwardedProxy(forwardedPort) : null;
 
             return new ProxyTunnelResponse(
                 Id,
@@ -351,6 +443,7 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
                 Note,
                 RemoteProxy.ProxyUri,
                 RemoteProxy.SafeDisplayUri,
+                DownstreamProtocol,
                 ListenAddress,
                 PublicHost,
                 RequestedListenPort,
@@ -367,6 +460,16 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
         public void Dispose()
         {
             Gate.Dispose();
+        }
+
+        private string BuildForwardedProxy(int forwardedPort)
+        {
+            var scheme =
+                DownstreamProtocol == Socks5DownstreamProtocol
+                    ? Socks5DownstreamProtocol
+                    : HttpDownstreamProtocol;
+
+            return $"{scheme}://{FormatHost(PublicHost)}:{forwardedPort}";
         }
 
         private static string FormatHost(string host) =>

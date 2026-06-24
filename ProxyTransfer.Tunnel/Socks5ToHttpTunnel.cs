@@ -4,7 +4,7 @@ using System.Text;
 
 namespace ProxyTransfer.Tunnel;
 
-public sealed class Socks5ProxyTunnel : IAsyncDisposable
+public sealed class Socks5ToHttpTunnel : IProxyTunnel
 {
     private readonly ProxyEndpoint _remoteProxy;
     private readonly TcpListener _server;
@@ -13,7 +13,7 @@ public sealed class Socks5ProxyTunnel : IAsyncDisposable
     private readonly Task _acceptLoopTask;
     private bool _disposed;
 
-    private Socks5ProxyTunnel(
+    private Socks5ToHttpTunnel(
         ProxyEndpoint remoteProxy,
         IPAddress listenAddress,
         int localPort,
@@ -32,7 +32,7 @@ public sealed class Socks5ProxyTunnel : IAsyncDisposable
             _stopRegistration = cancellationToken.Register(
                 static state =>
                 {
-                    var tunnel = (Socks5ProxyTunnel)state!;
+                    var tunnel = (Socks5ToHttpTunnel)state!;
                     tunnel._cts.Cancel();
                     tunnel._server.Stop();
                 },
@@ -55,7 +55,7 @@ public sealed class Socks5ProxyTunnel : IAsyncDisposable
 
     public string RemoteProxyUri => _remoteProxy.ProxyUri;
 
-    public static Task<Socks5ProxyTunnel> StartAsync(
+    public static Task<Socks5ToHttpTunnel> StartAsync(
         ProxyEndpoint remoteProxy,
         IPAddress? listenAddress = null,
         int localPort = 0,
@@ -63,7 +63,7 @@ public sealed class Socks5ProxyTunnel : IAsyncDisposable
         CancellationToken cancellationToken = default
     )
     {
-        var tunnel = new Socks5ProxyTunnel(
+        var tunnel = new Socks5ToHttpTunnel(
             remoteProxy,
             listenAddress ?? IPAddress.Loopback,
             localPort,
@@ -74,7 +74,7 @@ public sealed class Socks5ProxyTunnel : IAsyncDisposable
         return Task.FromResult(tunnel);
     }
 
-    public static Task<Socks5ProxyTunnel> StartAsync(
+    public static Task<Socks5ToHttpTunnel> StartAsync(
         string socksHost,
         int socksPort,
         string user,
@@ -162,7 +162,8 @@ public sealed class Socks5ProxyTunnel : IAsyncDisposable
 
                 if (remoteProxy.IsSocks5)
                 {
-                    await EstablishSocks5ConnectionAsync(
+                    await Socks5Protocol
+                        .EstablishUpstreamConnectionAsync(
                             upstreamStream,
                             remoteProxy,
                             targetHost,
@@ -200,58 +201,6 @@ public sealed class Socks5ProxyTunnel : IAsyncDisposable
             }
         }
         catch (OperationCanceledException) { }
-    }
-
-    private static async Task EstablishSocks5ConnectionAsync(
-        NetworkStream upstreamStream,
-        ProxyEndpoint remoteProxy,
-        string targetHost,
-        int targetPort,
-        CancellationToken token
-    )
-    {
-        await upstreamStream
-            .WriteAsync(new byte[] { 0x05, 0x02, 0x00, 0x02 }, token)
-            .ConfigureAwait(false);
-
-        var handshakeResponse = new byte[2];
-        await upstreamStream.ReadExactlyAsync(handshakeResponse, token).ConfigureAwait(false);
-
-        if (handshakeResponse[0] != 0x05)
-        {
-            throw new InvalidOperationException("SOCKS5 握手版本不正确。");
-        }
-
-        if (handshakeResponse[1] == 0x02)
-        {
-            var userBytes = Encoding.UTF8.GetBytes(remoteProxy.UserName ?? string.Empty);
-            var passwordBytes = Encoding.UTF8.GetBytes(remoteProxy.Password ?? string.Empty);
-            var authRequest = new byte[3 + userBytes.Length + passwordBytes.Length];
-            authRequest[0] = 0x01;
-            authRequest[1] = (byte)userBytes.Length;
-            Array.Copy(userBytes, 0, authRequest, 2, userBytes.Length);
-            authRequest[2 + userBytes.Length] = (byte)passwordBytes.Length;
-            Array.Copy(passwordBytes, 0, authRequest, 3 + userBytes.Length, passwordBytes.Length);
-
-            await upstreamStream.WriteAsync(authRequest, token).ConfigureAwait(false);
-
-            var authResponse = new byte[2];
-            await upstreamStream.ReadExactlyAsync(authResponse, token).ConfigureAwait(false);
-            if (authResponse[1] != 0x00)
-            {
-                throw new InvalidOperationException("SOCKS5 用户名/密码认证失败。");
-            }
-        }
-        else if (handshakeResponse[1] != 0x00)
-        {
-            throw new InvalidOperationException(
-                $"SOCKS5 服务端返回了不支持的认证方式: 0x{handshakeResponse[1]:X2}"
-            );
-        }
-
-        await SendConnectCommandAsync(upstreamStream, targetHost, targetPort, token)
-            .ConfigureAwait(false);
-        await ValidateConnectResponseAsync(upstreamStream, token).ConfigureAwait(false);
     }
 
     private static async Task EstablishHttpProxyConnectionAsync(
@@ -353,71 +302,6 @@ public sealed class Socks5ProxyTunnel : IAsyncDisposable
         {
             throw new InvalidOperationException($"HTTP CONNECT 失败，状态码: {statusCode}");
         }
-    }
-
-    private static async Task SendConnectCommandAsync(
-        NetworkStream socksStream,
-        string targetHost,
-        int targetPort,
-        CancellationToken token
-    )
-    {
-        if (targetPort is < IPEndPoint.MinPort or > IPEndPoint.MaxPort)
-        {
-            throw new ArgumentOutOfRangeException(nameof(targetPort), "目标端口超出有效范围。");
-        }
-
-        var hostBytes = Encoding.ASCII.GetBytes(targetHost);
-        var command = new byte[7 + hostBytes.Length];
-        command[0] = 0x05;
-        command[1] = 0x01;
-        command[2] = 0x00;
-        command[3] = 0x03;
-        command[4] = (byte)hostBytes.Length;
-        Array.Copy(hostBytes, 0, command, 5, hostBytes.Length);
-        command[5 + hostBytes.Length] = (byte)(targetPort >> 8);
-        command[6 + hostBytes.Length] = (byte)targetPort;
-
-        await socksStream.WriteAsync(command, token).ConfigureAwait(false);
-    }
-
-    private static async Task ValidateConnectResponseAsync(
-        NetworkStream socksStream,
-        CancellationToken token
-    )
-    {
-        var fixedResponse = new byte[4];
-        await socksStream.ReadExactlyAsync(fixedResponse, token).ConfigureAwait(false);
-
-        if (fixedResponse[1] != 0x00)
-        {
-            throw new InvalidOperationException(
-                $"SOCKS5 CONNECT 失败，错误码: 0x{fixedResponse[1]:X2}"
-            );
-        }
-
-        int addressLength = fixedResponse[3] switch
-        {
-            0x01 => 4,
-            0x03 => await ReadAddressLengthAsync(socksStream, token).ConfigureAwait(false),
-            0x04 => 16,
-            _ => throw new InvalidOperationException(
-                $"未知的 SOCKS5 地址类型: 0x{fixedResponse[3]:X2}"
-            ),
-        };
-
-        var trailingBytes = new byte[addressLength + 2];
-        await socksStream.ReadExactlyAsync(trailingBytes, token).ConfigureAwait(false);
-    }
-
-    private static async Task<int> ReadAddressLengthAsync(
-        NetworkStream socksStream,
-        CancellationToken token
-    )
-    {
-        var lengthBuffer = new byte[1];
-        await socksStream.ReadExactlyAsync(lengthBuffer, token).ConfigureAwait(false);
-        return lengthBuffer[0];
     }
 
     private static string FormatHost(string host) =>

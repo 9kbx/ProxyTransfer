@@ -43,6 +43,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -53,6 +54,7 @@ button {
 }
 
 input,
+select,
 textarea {
   width: 100%;
   border-radius: 16px;
@@ -64,6 +66,7 @@ textarea {
 }
 
 input:focus,
+select:focus,
 textarea:focus {
   outline: none;
   border-color: rgba(191, 90, 42, 0.54);
@@ -236,6 +239,17 @@ label span {
   margin-bottom: 0.45rem;
   font-size: 0.9rem;
   color: var(--muted);
+}
+
+.field-help {
+  display: block;
+  margin-top: 0.45rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.field-help.warning {
+  color: var(--warning);
 }
 
 .checkbox {

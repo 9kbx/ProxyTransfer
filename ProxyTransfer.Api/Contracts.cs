@@ -2,6 +2,7 @@ namespace ProxyTransfer.Api;
 
 public sealed record AddProxyRequest(
     string Proxy,
+    string? DownstreamProtocol,
     string? Note,
     string? BatchId,
     string? ListenAddress,
@@ -12,6 +13,7 @@ public sealed record AddProxyRequest(
 
 public sealed record ImportProxiesRequest(
     string ProxyText,
+    string? DownstreamProtocol,
     string? BatchId,
     string? Note,
     string? ListenAddress,
@@ -20,7 +22,12 @@ public sealed record ImportProxiesRequest(
     bool AutoStart = true
 );
 
-public sealed record StartProxyRequest(string? ListenAddress, string? PublicHost, int? ListenPort);
+public sealed record StartProxyRequest(
+    string? DownstreamProtocol,
+    string? ListenAddress,
+    string? PublicHost,
+    int? ListenPort
+);
 
 public sealed record StopBatchRequest(string BatchId);
 
@@ -30,6 +37,7 @@ public sealed record ProxyTunnelResponse(
     string? Note,
     string RemoteProxy,
     string RemoteProxyDisplay,
+    string DownstreamProtocol,
     string ListenAddress,
     string PublicHost,
     int RequestedListenPort,

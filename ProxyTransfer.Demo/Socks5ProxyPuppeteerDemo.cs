@@ -1,8 +1,8 @@
 using System.Diagnostics;
-using Microsoft.Extensions.Logging;
-using ProxyTransfer.Tunnel;
 using CloakBrowser;
 using CloakBrowser.Human;
+using Microsoft.Extensions.Logging;
+using ProxyTransfer.Tunnel;
 
 internal sealed class Socks5ProxyPuppeteerDemo
 {
@@ -13,10 +13,7 @@ internal sealed class Socks5ProxyPuppeteerDemo
         _logger = logger;
     }
 
-    public async Task RunAsync(
-        Socks5ProxyTunnel tunnel,
-        CancellationToken cancellationToken = default
-    )
+    public async Task RunAsync(IProxyTunnel tunnel, CancellationToken cancellationToken = default)
     {
         _logger.LogInformation(
             "[Puppeteer] 准备通过本地 HTTP 中转访问目标网站: {LocalProxyUri}",
@@ -39,20 +36,22 @@ internal sealed class Socks5ProxyPuppeteerDemo
         //     HumanPreset = HumanPreset.Careful,
         //     HumanConfig = new Dictionary<string, object> { ["typing_delay"] = 90.0 },
         // });
-        await using var ctx = await CloakLauncher.LaunchContextAsync(new LaunchContextOptions
-        {
-            Locale      = "en-US",
-            Timezone    = "America/New_York",
-            Viewport    = (1280, 800),
-            ColorScheme = "dark",
-            
-            Proxy = tunnel.LocalProxyUri,
-            
-            Headless = false,
-            Humanize = true,
-            HumanPreset = HumanPreset.Careful,
-            HumanConfig = new Dictionary<string, object> { ["typing_delay"] = 90.0 },
-        });
+        await using var ctx = await CloakLauncher.LaunchContextAsync(
+            new LaunchContextOptions
+            {
+                Locale = "en-US",
+                Timezone = "America/New_York",
+                Viewport = (1280, 800),
+                ColorScheme = "dark",
+
+                Proxy = tunnel.LocalProxyUri,
+
+                Headless = false,
+                Humanize = true,
+                HumanPreset = HumanPreset.Careful,
+                HumanConfig = new Dictionary<string, object> { ["typing_delay"] = 90.0 },
+            }
+        );
         var page = await ctx.NewPageAsync();
 
         _logger.LogInformation(

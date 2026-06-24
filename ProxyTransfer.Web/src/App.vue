@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 type TunnelRecord = {
   id: string
@@ -7,6 +7,7 @@ type TunnelRecord = {
   note: string | null
   remoteProxy: string
   remoteProxyDisplay: string
+  downstreamProtocol: string
   listenAddress: string
   publicHost: string
   requestedListenPort: number
@@ -35,6 +36,7 @@ const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.re
 
 const importForm = reactive({
   proxyText: '',
+  downstreamProtocol: 'http',
   batchId: '',
   note: '',
   listenAddress: '0.0.0.0',
@@ -45,6 +47,7 @@ const importForm = reactive({
 
 const manualForm = reactive({
   proxy: '',
+  downstreamProtocol: 'http',
   batchId: 'manual',
   note: '',
   listenAddress: '0.0.0.0',
@@ -62,6 +65,84 @@ const errorMessage = ref('')
 const runningCount = computed(() => tunnels.value.filter((item) => item.status === 'Running').length)
 const stoppedCount = computed(() => tunnels.value.filter((item) => item.status === 'Stopped').length)
 const errorCount = computed(() => tunnels.value.filter((item) => item.status === 'Error').length)
+
+function normalizeProxyLines(value: string) {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+}
+
+function detectProxyProtocol(value: string): 'http' | 'socks5' | 'unknown' {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return 'unknown'
+  }
+
+  if (/^socks5:\/\//i.test(trimmed)) {
+    return 'socks5'
+  }
+
+  if (/^http:\/\//i.test(trimmed)) {
+    return 'http'
+  }
+
+  if (trimmed.includes('://')) {
+    return 'unknown'
+  }
+
+  return 'http'
+}
+
+const manualUpstreamProtocol = computed(() => detectProxyProtocol(manualForm.proxy))
+
+const importUpstreamProtocols = computed(() =>
+  normalizeProxyLines(importForm.proxyText).map((line) => detectProxyProtocol(line)),
+)
+
+const manualSupportsSocks5Downstream = computed(() => manualUpstreamProtocol.value === 'socks5')
+
+const importSupportsSocks5Downstream = computed(() => {
+  const protocols = importUpstreamProtocols.value
+  return protocols.length > 0 && protocols.every((protocol) => protocol === 'socks5')
+})
+
+const manualDownstreamHint = computed(() => {
+  if (!manualForm.proxy.trim()) {
+    return '只有上游为 SOCKS5 时，才能选择下游 SOCKS5。'
+  }
+
+  if (manualSupportsSocks5Downstream.value) {
+    return '当前上游为 SOCKS5，可以选择下游 HTTP 或 SOCKS5。'
+  }
+
+  return '当前上游会按 HTTP 处理，因此下游只能选择 HTTP。'
+})
+
+const importDownstreamHint = computed(() => {
+  const protocols = importUpstreamProtocols.value
+  if (protocols.length === 0) {
+    return '批量导入时，只有每一行上游都显式为 socks5://...，才能选择下游 SOCKS5。'
+  }
+
+  if (importSupportsSocks5Downstream.value) {
+    return '当前批次的上游全部为 SOCKS5，可以选择下游 HTTP 或 SOCKS5。'
+  }
+
+  return '批次中只要包含 HTTP 上游，或未写 scheme 的代理行，系统就会限制为下游 HTTP。'
+})
+
+watch(manualSupportsSocks5Downstream, (supported) => {
+  if (!supported && manualForm.downstreamProtocol === 'socks5') {
+    manualForm.downstreamProtocol = 'http'
+  }
+})
+
+watch(importSupportsSocks5Downstream, (supported) => {
+  if (!supported && importForm.downstreamProtocol === 'socks5') {
+    importForm.downstreamProtocol = 'http'
+  }
+})
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
@@ -111,6 +192,7 @@ async function importBatch() {
   try {
     const payload = {
       proxyText: importForm.proxyText,
+      downstreamProtocol: importForm.downstreamProtocol,
       batchId: importForm.batchId || null,
       note: importForm.note || null,
       listenAddress: importForm.listenAddress || null,
@@ -148,6 +230,7 @@ async function addManualProxy() {
       method: 'POST',
       body: JSON.stringify({
         proxy: manualForm.proxy,
+        downstreamProtocol: manualForm.downstreamProtocol,
         batchId: manualForm.batchId || null,
         note: manualForm.note || null,
         listenAddress: manualForm.listenAddress || null,
@@ -192,6 +275,7 @@ async function startTunnel(item: TunnelRecord) {
     await apiFetch<TunnelRecord>(`/api/tunnels/${item.id}/start`, {
       method: 'POST',
       body: JSON.stringify({
+        downstreamProtocol: item.downstreamProtocol,
         listenAddress: item.listenAddress,
         publicHost: item.publicHost,
         listenPort: item.requestedListenPort > 0 ? item.requestedListenPort : null,
@@ -255,9 +339,9 @@ onMounted(loadData)
     <header class="hero">
       <div>
         <p class="eyebrow">Proxy Relay Console</p>
-        <h2>把带账号密码的 HTTP 或 SOCKS5 代理转成可直接交付的 HTTP 转发端口。</h2>
+        <h2>把带账号密码的 HTTP 或 SOCKS5 代理转成可直接交付的 HTTP 或 SOCKS5 转发端口。</h2>
         <p class="summary">
-          适合无法二次开发、且只接受无账号密码代理的客户端。先导入远端 HTTP 或 SOCKS5 代理，再复制本机对外暴露的转发地址给业务使用。
+          适合无法二次开发、且只接受无账号密码代理的客户端。先导入远端 HTTP 或 SOCKS5 代理，再按需要选择本机对外暴露的 HTTP 或 SOCKS5 地址给业务使用。
         </p>
       </div>
       <div class="metrics">
@@ -290,7 +374,7 @@ onMounted(loadData)
       <section class="panel">
         <div class="panel-head">
           <h2>批量导入 proxy.txt</h2>
-          <p>每行一个代理，支持 http://user:pass@host:port、socks5://user:pass@host:port，省略 scheme 时默认按 HTTP 解析。</p>
+          <p>每行一个代理，支持 http://user:pass@host:port、socks5://user:pass@host:port；如果省略 scheme，系统会按 HTTP 上游处理。</p>
         </div>
 
         <textarea
@@ -300,6 +384,14 @@ onMounted(loadData)
         />
 
         <div class="form-grid two-up">
+          <label>
+            <span>下游出口协议</span>
+            <select v-model="importForm.downstreamProtocol">
+              <option value="http">HTTP</option>
+              <option :disabled="!importSupportsSocks5Downstream" value="socks5">SOCKS5</option>
+            </select>
+            <small class="field-help" :class="{ warning: !importSupportsSocks5Downstream }">{{ importDownstreamHint }}</small>
+          </label>
           <label>
             <span>批次号</span>
             <input v-model="importForm.batchId" placeholder="留空则自动生成" />
@@ -332,13 +424,21 @@ onMounted(loadData)
       <section class="panel">
         <div class="panel-head">
           <h2>手动添加代理</h2>
-          <p>适合临时业务单独加几个代理。可以指定固定对外端口，便于直接交付给客户端。</p>
+          <p>适合临时业务单独加几个代理。可以指定固定对外端口，并选择对外暴露为 HTTP 或 SOCKS5。</p>
         </div>
 
         <div class="form-grid">
           <label>
             <span>代理</span>
             <input v-model="manualForm.proxy" placeholder="http://user:pass@host:port" />
+            <small class="field-help" :class="{ warning: manualUpstreamProtocol !== 'socks5' }">{{ manualDownstreamHint }}</small>
+          </label>
+          <label>
+            <span>下游出口协议</span>
+            <select v-model="manualForm.downstreamProtocol">
+              <option value="http">HTTP</option>
+              <option :disabled="!manualSupportsSocks5Downstream" value="socks5">SOCKS5</option>
+            </select>
           </label>
           <label>
             <span>批次号</span>
@@ -395,7 +495,7 @@ onMounted(loadData)
       <div class="panel-head row-between">
         <div>
           <h2>转发实例</h2>
-          <p>运行中的 forwarded proxy 就是可以复制给客户端的无账号密码 HTTP 代理。</p>
+          <p>运行中的 forwarded proxy 就是可以复制给客户端的无账号密码 HTTP 或 SOCKS5 代理。</p>
         </div>
       </div>
 
@@ -407,6 +507,7 @@ onMounted(loadData)
               <th>批次</th>
               <th>远端上游代理</th>
               <th>转发出口</th>
+              <th>下游协议</th>
               <th>监听配置</th>
               <th>时间</th>
               <th>操作</th>
@@ -430,6 +531,9 @@ onMounted(loadData)
                   <code>{{ item.forwardedProxy ?? '尚未启动' }}</code>
                   <button class="ghost small" :disabled="!item.forwardedProxy" @click="copyProxy(item.forwardedProxy)">复制</button>
                 </div>
+              </td>
+              <td>
+                <strong>{{ item.downstreamProtocol.toUpperCase() }}</strong>
               </td>
               <td>
                 <p>{{ item.listenAddress }}</p>

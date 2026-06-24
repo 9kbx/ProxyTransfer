@@ -21,10 +21,11 @@ internal sealed class Socks5HttpClientDemo
     {
         string proxyUri = $"socks5://{socks5Host}:{socks5Port}";
 
-        var proxy = new WebProxy(proxyUri)
+        var proxy = new WebProxy(proxyUri);
+        if (!string.IsNullOrWhiteSpace(socks5User))
         {
-            Credentials = new NetworkCredential(socks5User, socks5Pass),
-        };
+            proxy.Credentials = new NetworkCredential(socks5User, socks5Pass);
+        }
 
         using var handler = new SocketsHttpHandler { Proxy = proxy, UseProxy = true };
 

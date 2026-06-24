@@ -12,10 +12,7 @@ public class ProxyTunnelDemo
         _logger = logger;
     }
 
-    public async Task RunAsync(
-        Socks5ProxyTunnel tunnel,
-        CancellationToken cancellationToken = default
-    )
+    public async Task RunAsync(IProxyTunnel tunnel, CancellationToken cancellationToken = default)
     {
         _logger.LogInformation(
             "[代理] 使用本地 HTTP 中转访问目标网站: {LocalProxyUri}",

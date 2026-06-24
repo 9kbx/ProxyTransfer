@@ -1,17 +1,17 @@
 # ProxyTransfer
 
-ProxyTransfer 用来把带账号密码的 HTTP 或 SOCKS5 代理转成可直接交付给客户端使用的 HTTP 转发代理。
+ProxyTransfer 用来把带账号密码的 HTTP 或 SOCKS5 代理转成可直接交付给客户端使用的本地转发代理。
 
 典型场景是：
 
 - 上游代理是 `http://user:pass@host:port` 或 `socks5://user:pass@host:port`
 - 下游客户的软件不能二次开发
-- 下游客户的软件只支持无账号密码的 HTTP 代理或简单代理地址输入
+- 下游客户的软件只支持无账号密码的 HTTP 代理或 SOCKS5 代理地址输入
 
 这个仓库目前包含 4 个项目：
 
 - [ProxyTransfer](ProxyTransfer)：控制台示例工程，保留了 HttpClient、Puppeteer 和动态代理批次的 demo
-- [ProxyTransfer.Tunnel](ProxyTransfer.Tunnel)：可复用类库，提供 HTTP/SOCKS5 到 HTTP 的本地/公网转发能力
+- [ProxyTransfer.Tunnel](ProxyTransfer.Tunnel)：可复用类库，提供 HTTP/SOCKS5 到 HTTP，以及 SOCKS5 到 SOCKS5 的本地/公网转发能力
 - [ProxyTransfer.Api](ProxyTransfer.Api)：Minimal API 后端，负责导入代理、启动转发、查看状态、停止转发
 - [ProxyTransfer.Web](ProxyTransfer.Web)：Vue 3 管理台，用来操作 API
 
@@ -85,9 +85,9 @@ Vite 开发代理已经在 [ProxyTransfer.Web/vite.config.ts](ProxyTransfer.Web/
 
 - 粘贴 `proxy.txt` 内容批量导入 HTTP 或 SOCKS5 代理
 - 手动新增单个 HTTP 或 SOCKS5 代理
-- 为代理指定批次号、备注、监听地址、对外主机、公网端口
+- 为代理指定下游出口协议、批次号、备注、监听地址、对外主机、公网端口
 - 查看当前所有转发实例
-- 复制已经启动的 HTTP 转发地址给客户端
+- 复制已经启动的 HTTP 或 SOCKS5 转发地址给客户端
 - 停止单个代理
 - 按导入批次批量停止
 
@@ -128,6 +128,10 @@ user3:pass3@1.2.3.6:1080
 - `PublicHost = 203.0.113.10`
 - `FirstListenPort = 40000`
 
+如果批量导入时选择：
+
+- `DownstreamProtocol = http`
+
 那么导入后生成的转发出口会类似：
 
 - `http://203.0.113.10:40000`
@@ -136,6 +140,23 @@ user3:pass3@1.2.3.6:1080
 
 这些地址就是可以复制给客户端直接使用的无账号密码 HTTP 代理。
 
+如果批量导入时选择：
+
+- `DownstreamProtocol = socks5`
+
+并且这一批的每一条上游都显式是 `socks5://...`，那么生成的转发出口也可以是：
+
+- `socks5://203.0.113.10:41000`
+
+这个场景由 `Socks5ToSocks5Tunnel` 提供，适合下游软件支持 SOCKS5 但不支持填写用户名密码的情况。
+
+约束规则：
+
+- 上游是 HTTP 时，下游只能选择 HTTP
+- 上游省略 scheme 时，系统会按 HTTP 处理，所以下游也只能选择 HTTP
+- 只有上游显式是 SOCKS5 时，下游才能选择 HTTP 或 SOCKS5
+- 批量导入时，只要其中任意一行不是显式 SOCKS5，这一整批就不能选择下游 SOCKS5
+
 ### 手动添加代理
 
 适合临时业务场景。
@@ -143,6 +164,7 @@ user3:pass3@1.2.3.6:1080
 你只需要填：
 
 - 代理字符串，例如 `http://user:pass@host:port` 或 `socks5://user:pass@host:port`
+- 下游出口协议：`http` 或 `socks5`
 - 可选批次号
 - 可选备注
 - 可选固定端口
@@ -174,6 +196,7 @@ user3:pass3@1.2.3.6:1080
 ```json
 {
   "proxyText": "http://user:pass@1.2.3.4:8080\nsocks5://user:pass@1.2.3.5:1080",
+  "downstreamProtocol": "http",
   "batchId": "batch-a",
   "note": "海外线路 A",
   "listenAddress": "0.0.0.0",
@@ -190,6 +213,7 @@ user3:pass3@1.2.3.6:1080
 ```json
 {
   "proxy": "http://user:pass@1.2.3.4:8080",
+  "downstreamProtocol": "http",
   "batchId": "manual",
   "note": "VIP 客户",
   "listenAddress": "0.0.0.0",
@@ -205,11 +229,17 @@ user3:pass3@1.2.3.6:1080
 
 ```json
 {
+  "downstreamProtocol": "socks5",
   "listenAddress": "0.0.0.0",
   "publicHost": "203.0.113.10",
   "listenPort": 41000
 }
 ```
+
+字段说明：
+
+- `downstreamProtocol = "http"`：创建无认证 HTTP 出口
+- `downstreamProtocol = "socks5"`：创建无认证 SOCKS5 出口，仅允许 SOCKS5 上游使用
 
 ### `POST /api/tunnels/stop-batch`
 
@@ -225,12 +255,14 @@ user3:pass3@1.2.3.6:1080
 
 ### [ProxyTransfer.Tunnel](ProxyTransfer.Tunnel)
 
-这是核心类库，给其它 .NET 项目引用时主要使用两个类型：
+这是核心类库，给其它 .NET 项目引用时主要使用以下类型：
 
-- [ProxyTransfer.Tunnel/Socks5ProxyEndpoint.cs](ProxyTransfer.Tunnel/Socks5ProxyEndpoint.cs)
-- [ProxyTransfer.Tunnel/Socks5ProxyTunnel.cs](ProxyTransfer.Tunnel/Socks5ProxyTunnel.cs)
+- [ProxyTransfer.Tunnel/ProxyEndpoint.cs](ProxyTransfer.Tunnel/ProxyEndpoint.cs)
+- [ProxyTransfer.Tunnel/IProxyTunnel.cs](ProxyTransfer.Tunnel/IProxyTunnel.cs)
+- [ProxyTransfer.Tunnel/Socks5ToHttpTunnel.cs](ProxyTransfer.Tunnel/Socks5ToHttpTunnel.cs)
+- [ProxyTransfer.Tunnel/Socks5ToSocks5Tunnel.cs](ProxyTransfer.Tunnel/Socks5ToSocks5Tunnel.cs)
 
-#### `Socks5ProxyEndpoint` 的作用
+#### `ProxyEndpoint` 的作用
 
 - 解析 HTTP 或 SOCKS5 代理字符串
 - 提供带掩码的展示地址 `SafeDisplayUri`
@@ -242,7 +274,13 @@ user3:pass3@1.2.3.6:1080
 - `socks5://user:pass@host:port`
 - `user:pass@host:port`
 
-#### `Socks5ProxyTunnel` 的作用
+#### `IProxyTunnel` 的作用
+
+- 统一抽象本地转发隧道的最小公共能力
+- 暴露监听地址、对外主机、本地端口、本地代理地址、上游代理地址
+- 允许业务代码只依赖接口，而不是绑定具体隧道实现
+
+#### `Socks5ToHttpTunnel` 的作用
 
 - 建立一个本地或公网可访问的 HTTP CONNECT 转发入口
 - 把下游 HTTP CONNECT 请求转发到上游 HTTP 或 SOCKS5 代理
@@ -255,17 +293,44 @@ user3:pass3@1.2.3.6:1080
 using ProxyTransfer.Tunnel;
 using System.Net;
 
-var endpoint = Socks5ProxyEndpoint.Parse("socks5://user:pass@1.2.3.4:1080");
+var endpoint = ProxyEndpoint.Parse("socks5://user:pass@1.2.3.4:1080");
 
-await using var tunnel = await Socks5ProxyTunnel.StartAsync(
-    endpoint,
-    IPAddress.Parse("0.0.0.0"),
-    40000,
-    "203.0.113.10"
+await using var tunnel = await Socks5ToHttpTunnel.StartAsync(
+  endpoint,
+  IPAddress.Parse("0.0.0.0"),
+  40000,
+  "203.0.113.10"
 );
 
 Console.WriteLine(tunnel.LocalProxyUri);
 ```
+
+如果希望把带认证的上游 SOCKS5 转成无认证的下游 SOCKS5，可以这样：
+
+```csharp
+using ProxyTransfer.Tunnel;
+using System.Net;
+
+var endpoint = ProxyEndpoint.Parse("socks5://user:pass@1.2.3.4:1080");
+
+await using var tunnel = await Socks5ToSocks5Tunnel.StartAsync(
+  endpoint,
+  IPAddress.Parse("0.0.0.0"),
+  41000,
+  "203.0.113.10"
+);
+
+Console.WriteLine(tunnel.LocalProxyUri);
+```
+
+#### `Socks5ToSocks5Tunnel` 的作用
+
+- 建立一个本地或公网可访问的无认证 SOCKS5 转发入口
+- 把下游 SOCKS5 CONNECT 请求转发到上游 SOCKS5 代理
+- 自动处理上游 SOCKS5 的用户名密码认证
+- 通过 `DisposeAsync` 停止监听并释放资源
+
+现在 API 和管理台都已经支持选择下游 HTTP 或 SOCKS5 出口；但当上游是 HTTP 时，管理台会自动限制下游只能使用 HTTP。
 
 ### [ProxyTransfer.Api](ProxyTransfer.Api)
 
