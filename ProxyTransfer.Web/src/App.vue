@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 
 type TunnelRecord = {
   id: string
@@ -24,6 +24,24 @@ type BatchSummary = {
   batchId: string
   totalCount: number
   runningCount: number
+}
+
+type BatchTunnelTestResponse = {
+  batchId: string
+  totalCount: number
+  testedCount: number
+  successCount: number
+  failureCount: number
+  items: Array<{
+    tunnelId: string
+    proxyDisplay: string
+    forwardedProxy: string | null
+    status: string
+    success: boolean
+    errorMessage: string | null
+    runId: string | null
+    completedAt: string | null
+  }>
 }
 
 type ImportResponse = {
@@ -60,6 +78,33 @@ type UpstreamPoolDetails = UpstreamPoolRecord & {
   items: UpstreamProxyRecord[]
 }
 
+type UpstreamProxyTestItem = {
+  upstreamId: string
+  proxyDisplay: string
+  success: boolean
+  exitIp: string | null
+  elapsedMilliseconds: number | null
+  errorMessage: string | null
+  testedAt: string
+}
+
+type UpstreamPoolTestResponse = {
+  runId: string
+  completedAt: string
+  poolId: string
+  totalCount: number
+  successCount: number
+  failureCount: number
+  items: UpstreamProxyTestItem[]
+}
+
+type UpstreamPoolRetestComparison = {
+  previousRunId: string
+  currentRunId: string
+  recoveredUpstreamIds: string[]
+  stillFailedUpstreamIds: string[]
+}
+
 type ImportUpstreamPoolResponse = {
   poolId: string
   importedCount: number
@@ -90,7 +135,45 @@ type FixedProxyRecord = {
   lastError: string | null
 }
 
+type ProxyTestLogRecord = {
+  timestamp: string
+  level: string
+  message: string
+}
+
+type ProxyTestSwitchSummary = {
+  hasExitIpSwitch: boolean
+  hasUpstreamSwitch: boolean
+  exitIpSwitchCount: number
+  upstreamSwitchCount: number
+  uniqueExitIpCount: number
+  uniqueUpstreamCount: number
+  successfulObservationCount: number
+}
+
+type ProxyTestResult = {
+  runId: string
+  completedAt: string
+  mode: string
+  resourceId: string
+  proxyDisplay: string
+  forwardedProxy: string | null
+  success: boolean
+  successCount: number
+  failureCount: number
+  lastExitIp: string | null
+  lastSelectedUpstreamDisplay: string | null
+  switchSummary: ProxyTestSwitchSummary | null
+  logs: ProxyTestLogRecord[]
+}
+
 type ViewMode = 'classic' | 'fixed'
+
+type FloatingNavItem = {
+  id: string
+  label: string
+  shortLabel: string
+}
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 
@@ -135,6 +218,11 @@ const fixedProxyForm = reactive({
   autoStart: true,
 })
 
+const fixedTestForm = reactive({
+  iterationCount: '6',
+  intervalSeconds: '5',
+})
+
 const tunnels = ref<TunnelRecord[]>([])
 const batches = ref<BatchSummary[]>([])
 const upstreamPools = ref<UpstreamPoolRecord[]>([])
@@ -144,6 +232,13 @@ const fixedProxies = ref<FixedProxyRecord[]>([])
 const busy = ref(false)
 const statusMessage = ref('')
 const errorMessage = ref('')
+const testHistory = ref<ProxyTestResult[]>([])
+const upstreamPoolTestHistory = ref<UpstreamPoolTestResponse[]>([])
+const selectedUpstreamPoolTestRunId = ref('')
+const upstreamPoolRetestComparison = ref<UpstreamPoolRetestComparison | null>(null)
+const selectedClassicTestRunId = ref('')
+const selectedFixedTestRunId = ref('')
+const selectedFixedHistoryResourceId = ref('')
 
 const runningCount = computed(() => tunnels.value.filter((item) => item.status === 'Running').length)
 const stoppedCount = computed(() => tunnels.value.filter((item) => item.status === 'Stopped').length)
@@ -163,6 +258,58 @@ const runningFixedProxies = computed(() =>
     .filter((item) => item.status === 'Running' && item.forwardedProxy)
     .map((item) => item.forwardedProxy as string),
 )
+const classicTestHistory = computed(() => testHistory.value.filter((item) => item.mode === 'single'))
+const fixedTestHistory = computed(() => testHistory.value.filter((item) => item.mode === 'fixed'))
+const selectedClassicTestResult = computed(() =>
+  classicTestHistory.value.find((item) => item.runId === selectedClassicTestRunId.value) ?? null,
+)
+const selectedFixedTestResult = computed(() =>
+  fixedTestHistory.value.find((item) => item.runId === selectedFixedTestRunId.value) ?? null,
+)
+const selectedUpstreamPoolTestRun = computed(() =>
+  upstreamPoolTestHistory.value.find((item) => item.runId === selectedUpstreamPoolTestRunId.value) ?? null,
+)
+const selectedUpstreamPoolTestLookup = computed<Record<string, UpstreamProxyTestItem>>(() =>
+  Object.fromEntries((selectedUpstreamPoolTestRun.value?.items ?? []).map((item) => [item.upstreamId, item])),
+)
+const selectedUpstreamPoolSuccessItems = computed(() =>
+  (selectedUpstreamPoolTestRun.value?.items ?? []).filter((item) => item.success),
+)
+const selectedUpstreamPoolFailureItems = computed(() =>
+  (selectedUpstreamPoolTestRun.value?.items ?? []).filter((item) => !item.success),
+)
+const selectedUpstreamPoolRetestLookup = computed<Record<string, 'recovered' | 'still-failed'>>(() => {
+  const comparison = upstreamPoolRetestComparison.value
+  if (!comparison || comparison.currentRunId !== selectedUpstreamPoolTestRun.value?.runId) {
+    return {}
+  }
+
+  return Object.fromEntries([
+    ...comparison.recoveredUpstreamIds.map((id) => [id, 'recovered' as const]),
+    ...comparison.stillFailedUpstreamIds.map((id) => [id, 'still-failed' as const]),
+  ])
+})
+
+const floatingNavItems = computed<FloatingNavItem[]>(() => {
+  if (activeView.value === 'classic') {
+    return [
+      { id: 'classic-import', label: '批量导入代理', shortLabel: '导' },
+      { id: 'classic-manual', label: '手动添加代理', shortLabel: '手' },
+      { id: 'classic-batches', label: '批次概览', shortLabel: '批' },
+      { id: 'classic-tunnels', label: '转发实例', shortLabel: '转' },
+      { id: 'classic-test-logs', label: '测试日志', shortLabel: '测' },
+    ]
+  }
+
+  return [
+    { id: 'fixed-import', label: '导入上游池', shortLabel: '池' },
+    { id: 'fixed-create', label: '创建固定入口', shortLabel: '固' },
+    { id: 'fixed-pools', label: '上游池概览', shortLabel: '览' },
+    { id: 'fixed-health', label: '池内健康状态', shortLabel: '健' },
+    { id: 'fixed-entries', label: '固定下游代理入口', shortLabel: '口' },
+    { id: 'fixed-test-logs', label: '测试日志', shortLabel: '测' },
+  ]
+})
 
 const manualDownstreamHint = computed(() => {
   if (!manualForm.proxy.trim()) {
@@ -258,15 +405,44 @@ async function loadFixedData() {
   if (!fixedProxyForm.poolId && poolData.length > 0) {
     fixedProxyForm.poolId = poolData[0].poolId
   }
+
+  if (!fixedData.some((item) => item.id === selectedFixedHistoryResourceId.value)) {
+    selectedFixedHistoryResourceId.value = fixedData[0]?.id ?? ''
+  }
+}
+
+async function loadUpstreamPoolTestHistory(poolId?: string | null) {
+  const suffix = poolId ? `?poolId=${encodeURIComponent(poolId)}` : ''
+  upstreamPoolTestHistory.value = await apiFetch<UpstreamPoolTestResponse[]>(`/api/upstream-pool-test-history${suffix}`)
+  ensureSelectedUpstreamPoolTestRun()
+}
+
+async function loadTestHistory(mode?: 'single' | 'fixed', resourceId?: string | null) {
+  const searchParams = new URLSearchParams()
+  if (mode) {
+    searchParams.set('mode', mode)
+  }
+
+  if (resourceId) {
+    searchParams.set('resourceId', resourceId)
+  }
+
+  const suffix = searchParams.size > 0 ? `?${searchParams.toString()}` : ''
+  testHistory.value = await apiFetch<ProxyTestResult[]>(`/api/test-history${suffix}`)
+  ensureSelectedTestRuns()
 }
 
 async function refreshActiveView() {
   if (activeView.value === 'classic') {
-    await loadClassicData()
+    await Promise.all([loadClassicData(), loadTestHistory('single')])
     return
   }
 
   await loadFixedData()
+  await Promise.all([
+    loadTestHistory('fixed', selectedFixedHistoryResourceId.value || null),
+    loadUpstreamPoolTestHistory(selectedPoolId.value || null),
+  ])
 }
 
 async function changeView(view: ViewMode) {
@@ -369,6 +545,20 @@ async function stopBatch(batchId: string) {
   })
 }
 
+async function testBatch(batchId: string) {
+  await withBusy(async () => {
+    const response = await apiFetch<BatchTunnelTestResponse>('/api/tunnels/test-batch', {
+      method: 'POST',
+      body: JSON.stringify({ batchId, runningOnly: true }),
+    })
+
+    await loadTestHistory('single')
+    statusMessage.value = `批次 ${response.batchId} 测试完成，共测试 ${response.testedCount} 个，成功 ${response.successCount} 个，失败 ${response.failureCount} 个。`
+    await nextTick()
+    scrollToSection('classic-test-logs')
+  })
+}
+
 async function importUpstreamPool() {
   if (!upstreamPoolForm.proxyText.trim()) {
     errorMessage.value = '请先粘贴一批上游代理。'
@@ -397,7 +587,17 @@ async function selectPool(poolId: string) {
   selectedPoolId.value = poolId
   await withBusy(async () => {
     selectedPool.value = await apiFetch<UpstreamPoolDetails>(`/api/upstream-pools/${poolId}`)
+    await loadUpstreamPoolTestHistory(poolId)
   })
+}
+
+async function reloadSelectedPool() {
+  if (!selectedPoolId.value) {
+    selectedPool.value = null
+    return
+  }
+
+  selectedPool.value = await apiFetch<UpstreamPoolDetails>(`/api/upstream-pools/${selectedPoolId.value}`)
 }
 
 async function addFixedProxy() {
@@ -444,6 +644,225 @@ async function stopFixedProxy(id: string) {
   })
 }
 
+async function testTunnel(item: TunnelRecord) {
+  await withBusy(async () => {
+    const result = await apiFetch<ProxyTestResult>(`/api/tunnels/${item.id}/test`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
+
+    rememberTestResult(result)
+    statusMessage.value = `单个代理测试完成，成功 ${result.successCount} 次，失败 ${result.failureCount} 次。`
+    await nextTick()
+    scrollToSection('classic-test-logs')
+  })
+}
+
+async function testFixedProxy(item: FixedProxyRecord) {
+  selectedFixedHistoryResourceId.value = item.id
+
+  await withBusy(async () => {
+    const result = await apiFetch<ProxyTestResult>(`/api/fixed-proxies/${item.id}/test`, {
+      method: 'POST',
+      body: JSON.stringify({
+        iterationCount: fixedTestForm.iterationCount ? Number(fixedTestForm.iterationCount) : null,
+        intervalSeconds: fixedTestForm.intervalSeconds ? Number(fixedTestForm.intervalSeconds) : null,
+      }),
+    })
+
+    rememberTestResult(result)
+    statusMessage.value = `固定代理测试完成，成功 ${result.successCount} 次，失败 ${result.failureCount} 次。`
+    await nextTick()
+    scrollToSection('fixed-test-logs')
+    await loadFixedData()
+    await loadTestHistory('fixed', item.id)
+  })
+}
+
+async function refreshTestHistory() {
+  await withBusy(async () => {
+    if (activeView.value === 'classic') {
+      await loadTestHistory('single')
+    } else {
+      await loadTestHistory('fixed', selectedFixedHistoryResourceId.value || null)
+    }
+
+    statusMessage.value = '测试历史已刷新。'
+  })
+}
+
+async function changeFixedHistoryResource() {
+  selectedFixedTestRunId.value = ''
+
+  await withBusy(async () => {
+    await loadTestHistory('fixed', selectedFixedHistoryResourceId.value || null)
+  })
+}
+
+async function viewFixedProxyHistory(item: FixedProxyRecord) {
+  selectedFixedHistoryResourceId.value = item.id
+  await nextTick()
+  scrollToSection('fixed-test-logs')
+  await changeFixedHistoryResource()
+}
+
+async function testSelectedPool() {
+  if (!selectedPoolId.value) {
+    errorMessage.value = '请先选择一个上游池。'
+    return
+  }
+
+  await withBusy(async () => {
+    const response = await apiFetch<UpstreamPoolTestResponse>(`/api/upstream-pools/${selectedPoolId.value}/test`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
+
+    upstreamPoolRetestComparison.value = null
+    rememberUpstreamPoolTest(response)
+
+    await reloadSelectedPool()
+    statusMessage.value = `上游池 ${response.poolId} 测试完成，成功 ${response.successCount} 个，失败 ${response.failureCount} 个。`
+  })
+}
+
+async function testUpstreamProxy(item: UpstreamProxyRecord) {
+  await withBusy(async () => {
+    const response = await apiFetch<UpstreamPoolTestResponse>(`/api/upstream-pools/${item.poolId}/test`, {
+      method: 'POST',
+      body: JSON.stringify({ upstreamId: item.id }),
+    })
+
+    const result = response.items[0]
+    upstreamPoolRetestComparison.value = null
+    rememberUpstreamPoolTest(response)
+    await reloadSelectedPool()
+    statusMessage.value = result?.success
+      ? `上游代理测试成功，出口 IP ${result.exitIp ?? '未知'}。`
+      : `上游代理测试失败：${result?.errorMessage ?? '未知错误'}`
+  })
+}
+
+async function retestFailedUpstreamProxies() {
+  if (!selectedPoolId.value || !selectedUpstreamPoolFailureItems.value.length) {
+    errorMessage.value = '当前没有可重测的失败上游代理。'
+    return
+  }
+
+  const previousRun = selectedUpstreamPoolTestRun.value
+  const previousFailedIds = selectedUpstreamPoolFailureItems.value.map((item) => item.upstreamId)
+
+  await withBusy(async () => {
+    const response = await apiFetch<UpstreamPoolTestResponse>(`/api/upstream-pools/${selectedPoolId.value}/test`, {
+      method: 'POST',
+      body: JSON.stringify({ upstreamIds: selectedUpstreamPoolFailureItems.value.map((item) => item.upstreamId) }),
+    })
+
+    rememberUpstreamPoolTest(response)
+    const stillFailedUpstreamIds = response.items.filter((item) => !item.success).map((item) => item.upstreamId)
+    const recoveredUpstreamIds = previousFailedIds.filter((id) => !stillFailedUpstreamIds.includes(id))
+    upstreamPoolRetestComparison.value = previousRun
+      ? {
+          previousRunId: previousRun.runId,
+          currentRunId: response.runId,
+          recoveredUpstreamIds,
+          stillFailedUpstreamIds,
+        }
+      : null
+    await reloadSelectedPool()
+    statusMessage.value = `失败项重测完成，成功 ${response.successCount} 个，失败 ${response.failureCount} 个。`
+  })
+}
+
+async function refreshUpstreamPoolTestHistory() {
+  await withBusy(async () => {
+    await loadUpstreamPoolTestHistory(selectedPoolId.value || null)
+    statusMessage.value = '上游池测试历史已刷新。'
+  })
+}
+
+async function deleteSelectedUpstreamPoolTestRun() {
+  const selectedRun = selectedUpstreamPoolTestRun.value
+  if (!selectedRun) {
+    return
+  }
+
+  await withBusy(async () => {
+    await apiFetch<{ runId: string; deleted: boolean }>(`/api/upstream-pool-test-history/${selectedRun.runId}`, {
+      method: 'DELETE',
+    })
+
+    upstreamPoolTestHistory.value = upstreamPoolTestHistory.value.filter((item) => item.runId !== selectedRun.runId)
+    upstreamPoolRetestComparison.value = null
+    ensureSelectedUpstreamPoolTestRun()
+    statusMessage.value = '已删除这次上游池测试记录。'
+  })
+}
+
+async function clearCurrentPoolTestHistory() {
+  if (!selectedPoolId.value) {
+    errorMessage.value = '请先选择一个上游池。'
+    return
+  }
+
+  await withBusy(async () => {
+    const response = await apiFetch<{ poolId: string; removedCount: number }>('/api/upstream-pool-test-history/clear?' + new URLSearchParams({ poolId: selectedPoolId.value }).toString(), {
+      method: 'POST',
+    })
+
+    upstreamPoolTestHistory.value = []
+    selectedUpstreamPoolTestRunId.value = ''
+    upstreamPoolRetestComparison.value = null
+    statusMessage.value = `已清空上游池 ${response.poolId} 的 ${response.removedCount} 条测试历史。`
+  })
+}
+
+function clearClassicTestSelection() {
+  selectedClassicTestRunId.value = ''
+}
+
+function clearFixedTestSelection() {
+  selectedFixedTestRunId.value = ''
+}
+
+function clearUpstreamPoolTestSelection() {
+  selectedUpstreamPoolTestRunId.value = ''
+  upstreamPoolRetestComparison.value = null
+}
+
+function rememberTestResult(result: ProxyTestResult) {
+  testHistory.value = [result, ...testHistory.value.filter((item) => item.runId !== result.runId)]
+
+  if (result.mode === 'single') {
+    selectedClassicTestRunId.value = result.runId
+    return
+  }
+
+  selectedFixedHistoryResourceId.value = result.resourceId
+  selectedFixedTestRunId.value = result.runId
+}
+
+function rememberUpstreamPoolTest(result: UpstreamPoolTestResponse) {
+  upstreamPoolTestHistory.value = [result, ...upstreamPoolTestHistory.value.filter((item) => item.runId !== result.runId)]
+  selectedUpstreamPoolTestRunId.value = result.runId
+}
+
+function ensureSelectedTestRuns() {
+  if (!classicTestHistory.value.some((item) => item.runId === selectedClassicTestRunId.value)) {
+    selectedClassicTestRunId.value = classicTestHistory.value[0]?.runId ?? ''
+  }
+
+  if (!fixedTestHistory.value.some((item) => item.runId === selectedFixedTestRunId.value)) {
+    selectedFixedTestRunId.value = fixedTestHistory.value[0]?.runId ?? ''
+  }
+}
+
+function ensureSelectedUpstreamPoolTestRun() {
+  if (!upstreamPoolTestHistory.value.some((item) => item.runId === selectedUpstreamPoolTestRunId.value)) {
+    selectedUpstreamPoolTestRunId.value = upstreamPoolTestHistory.value[0]?.runId ?? ''
+  }
+}
+
 async function copyProxy(value: string | null) {
   if (!value) {
     return
@@ -478,15 +897,38 @@ function formatTime(value: string | null) {
   return new Date(value).toLocaleString()
 }
 
+function scrollToSection(sectionId: string) {
+  const element = document.getElementById(sectionId)
+  if (!element) {
+    return
+  }
+
+  element.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
 onMounted(async () => {
   await withBusy(async () => {
-    await loadClassicData()
+    await refreshActiveView()
   })
 })
 </script>
 
 <template>
   <div class="shell">
+    <aside class="floating-nav" aria-label="页面快捷导航">
+      <div class="floating-nav__hint">快捷导航</div>
+      <button
+        v-for="item in floatingNavItems"
+        :key="item.id"
+        class="floating-nav__item"
+        type="button"
+        @click="scrollToSection(item.id)"
+      >
+        <span class="floating-nav__badge">{{ item.shortLabel }}</span>
+        <span class="floating-nav__label">{{ item.label }}</span>
+      </button>
+    </aside>
+
     <header class="hero">
       <div>
         <p class="eyebrow">Proxy Relay Console</p>
@@ -542,7 +984,7 @@ onMounted(async () => {
 
     <template v-if="activeView === 'classic'">
       <main class="grid">
-      <section class="panel">
+      <section id="classic-import" class="panel scroll-section">
         <div class="panel-head">
           <h2>批量导入 proxy.txt</h2>
           <p>每行一个代理，支持 http://user:pass@host:port、socks5://user:pass@host:port；如果省略 scheme，系统会按 HTTP 上游处理，但下游仍可选 HTTP 或 SOCKS5。</p>
@@ -592,7 +1034,7 @@ onMounted(async () => {
         <button class="primary" :disabled="busy" @click="importBatch">导入并创建批次</button>
       </section>
 
-      <section class="panel">
+      <section id="classic-manual" class="panel scroll-section">
         <div class="panel-head">
           <h2>手动添加代理</h2>
           <p>适合临时业务单独加几个代理。可以指定固定对外端口，并选择对外暴露为 HTTP 或 SOCKS5。</p>
@@ -641,7 +1083,7 @@ onMounted(async () => {
       </section>
       </main>
 
-      <section class="panel wide">
+      <section id="classic-batches" class="panel wide scroll-section">
       <div class="panel-head row-between">
         <div>
           <h2>批次概览</h2>
@@ -656,13 +1098,16 @@ onMounted(async () => {
             <strong>{{ batch.runningCount }} / {{ batch.totalCount }}</strong>
             <span>运行中 / 总数</span>
           </div>
-          <button class="ghost danger" :disabled="busy" @click="stopBatch(batch.batchId)">停止整个批次</button>
+          <div class="action-stack">
+            <button class="ghost" :disabled="busy || !batch.runningCount" @click="testBatch(batch.batchId)">测试整个批次</button>
+            <button class="ghost danger" :disabled="busy" @click="stopBatch(batch.batchId)">停止整个批次</button>
+          </div>
         </article>
       </div>
       <p v-else class="empty">还没有导入任何批次。</p>
       </section>
 
-      <section class="panel wide">
+      <section id="classic-tunnels" class="panel wide scroll-section">
       <div class="panel-head row-between">
         <div>
           <h2>转发实例</h2>
@@ -721,6 +1166,7 @@ onMounted(async () => {
               </td>
               <td>
                 <div class="action-stack">
+                  <button class="ghost" :disabled="busy || item.status !== 'Running'" @click="testTunnel(item)">测试</button>
                   <button v-if="item.status !== 'Running'" class="ghost" :disabled="busy" @click="startTunnel(item)">启动</button>
                   <button v-else class="ghost danger" :disabled="busy" @click="stopTunnel(item.id)">停止</button>
                 </div>
@@ -731,11 +1177,55 @@ onMounted(async () => {
       </div>
       <p v-else class="empty">当前还没有任何转发实例。</p>
       </section>
+
+      <section id="classic-test-logs" class="panel wide scroll-section">
+        <div class="panel-head row-between">
+          <div>
+            <h2>测试日志</h2>
+            <p>服务端会缓存最近几次单代理测试。刷新页面后仍可从这里回看。</p>
+          </div>
+          <div class="panel-tools">
+            <button class="ghost" :disabled="busy" @click="refreshTestHistory">刷新历史</button>
+            <button class="ghost" :disabled="!selectedClassicTestResult" @click="clearClassicTestSelection">取消选中</button>
+          </div>
+        </div>
+
+        <div v-if="classicTestHistory.length" class="history-strip">
+          <button
+            v-for="item in classicTestHistory"
+            :key="item.runId"
+            class="history-card"
+            :class="{ selected: item.runId === selectedClassicTestRunId }"
+            @click="selectedClassicTestRunId = item.runId"
+          >
+            <strong>{{ formatTime(item.completedAt) }}</strong>
+            <span>{{ item.success ? '成功' : '存在失败' }}</span>
+            <p>{{ item.forwardedProxy ?? item.proxyDisplay }}</p>
+          </button>
+        </div>
+
+        <div v-if="selectedClassicTestResult" class="test-console">
+          <div class="test-console__summary">
+            <p>时间: {{ formatTime(selectedClassicTestResult.completedAt) }}</p>
+            <p>代理: {{ selectedClassicTestResult.forwardedProxy ?? selectedClassicTestResult.proxyDisplay }}</p>
+            <p>出口 IP: {{ selectedClassicTestResult.lastExitIp ?? '未知' }}</p>
+            <p>最近上游: {{ selectedClassicTestResult.lastSelectedUpstreamDisplay ?? '不适用' }}</p>
+          </div>
+          <div class="test-log-list">
+            <article v-for="(log, index) in selectedClassicTestResult.logs" :key="`${log.timestamp}-${index}`" class="test-log-item" :class="`is-${log.level}`">
+              <time>{{ formatTime(log.timestamp) }}</time>
+              <strong>{{ log.level.toUpperCase() }}</strong>
+              <p>{{ log.message }}</p>
+            </article>
+          </div>
+        </div>
+        <p v-else class="empty">还没有单代理测试历史。先在“转发实例”里点击某个运行中代理的“测试”。</p>
+      </section>
     </template>
 
     <template v-else>
       <main class="grid">
-        <section class="panel">
+        <section id="fixed-import" class="panel scroll-section">
           <div class="panel-head">
             <h2>导入上游池</h2>
             <p>每行一个上游代理，导入到同一个池中。固定入口创建后会从池里按粘性策略选择健康上游。</p>
@@ -761,7 +1251,7 @@ onMounted(async () => {
           <button class="primary" :disabled="busy" @click="importUpstreamPool">导入上游池</button>
         </section>
 
-        <section class="panel">
+        <section id="fixed-create" class="panel scroll-section">
           <div class="panel-head">
             <h2>创建固定下游代理入口</h2>
             <p>客户端始终使用这个固定地址；服务端会在上游池内按粘性会话复用健康代理，故障时自动切换。</p>
@@ -815,7 +1305,7 @@ onMounted(async () => {
         </section>
       </main>
 
-      <section class="panel wide">
+      <section id="fixed-pools" class="panel wide scroll-section">
         <div class="panel-head row-between">
           <div>
             <h2>上游池概览</h2>
@@ -842,11 +1332,64 @@ onMounted(async () => {
         <p v-else class="empty">当前还没有任何上游池。</p>
       </section>
 
-      <section class="panel wide">
+      <section id="fixed-health" class="panel wide scroll-section">
         <div class="panel-head row-between">
           <div>
             <h2>池内健康状态</h2>
             <p>当前展示 {{ selectedPoolId || '未选择' }} 的上游代理健康情况。</p>
+          </div>
+          <div class="panel-tools">
+            <button class="ghost" :disabled="busy || !selectedPoolItems.length" @click="testSelectedPool">测试整个上游池</button>
+            <button class="ghost" :disabled="busy || !selectedUpstreamPoolFailureItems.length" @click="retestFailedUpstreamProxies">仅重测失败项</button>
+            <button class="ghost" :disabled="busy || !selectedPoolId" @click="refreshUpstreamPoolTestHistory">刷新历史</button>
+            <button class="ghost danger" :disabled="busy || !selectedUpstreamPoolTestRun" @click="deleteSelectedUpstreamPoolTestRun">删除这次记录</button>
+            <button class="ghost danger" :disabled="busy || !selectedPoolId || !upstreamPoolTestHistory.length" @click="clearCurrentPoolTestHistory">清空当前池历史</button>
+            <button class="ghost" :disabled="!selectedUpstreamPoolTestRun" @click="clearUpstreamPoolTestSelection">取消选中</button>
+          </div>
+        </div>
+
+        <div v-if="upstreamPoolTestHistory.length" class="history-strip">
+          <button
+            v-for="item in upstreamPoolTestHistory"
+            :key="item.runId"
+            class="history-card"
+            :class="{ selected: item.runId === selectedUpstreamPoolTestRunId }"
+            @click="selectedUpstreamPoolTestRunId = item.runId"
+          >
+            <strong>{{ formatTime(item.completedAt) }}</strong>
+            <span>{{ item.successCount }} 成功 / {{ item.failureCount }} 失败</span>
+            <p>{{ item.poolId }}</p>
+          </button>
+        </div>
+
+        <div v-if="selectedUpstreamPoolTestRun" class="test-console">
+          <div class="test-console__summary">
+            <p>时间: {{ formatTime(selectedUpstreamPoolTestRun.completedAt) }}</p>
+            <p>上游池: {{ selectedUpstreamPoolTestRun.poolId }}</p>
+            <p>成功: {{ selectedUpstreamPoolTestRun.successCount }}</p>
+            <p>失败: {{ selectedUpstreamPoolTestRun.failureCount }}</p>
+          </div>
+          <div class="switch-grid">
+            <article class="switch-card is-active">
+              <span>成功代理</span>
+              <strong>{{ selectedUpstreamPoolSuccessItems.length }}</strong>
+              <p>{{ selectedUpstreamPoolSuccessItems.map((item) => item.proxyDisplay).join(' / ') || '无' }}</p>
+            </article>
+            <article class="switch-card is-muted">
+              <span>失败代理</span>
+              <strong>{{ selectedUpstreamPoolFailureItems.length }}</strong>
+              <p>{{ selectedUpstreamPoolFailureItems.map((item) => item.proxyDisplay).join(' / ') || '无' }}</p>
+            </article>
+            <article v-if="upstreamPoolRetestComparison && upstreamPoolRetestComparison.currentRunId === selectedUpstreamPoolTestRun.runId" class="switch-card is-active">
+              <span>已恢复</span>
+              <strong>{{ upstreamPoolRetestComparison.recoveredUpstreamIds.length }}</strong>
+              <p>{{ selectedUpstreamPoolSuccessItems.filter((item) => upstreamPoolRetestComparison?.recoveredUpstreamIds.includes(item.upstreamId)).map((item) => item.proxyDisplay).join(' / ') || '无' }}</p>
+            </article>
+            <article v-if="upstreamPoolRetestComparison && upstreamPoolRetestComparison.currentRunId === selectedUpstreamPoolTestRun.runId" class="switch-card is-muted">
+              <span>仍失败</span>
+              <strong>{{ upstreamPoolRetestComparison.stillFailedUpstreamIds.length }}</strong>
+              <p>{{ selectedUpstreamPoolFailureItems.filter((item) => upstreamPoolRetestComparison?.stillFailedUpstreamIds.includes(item.upstreamId)).map((item) => item.proxyDisplay).join(' / ') || '无' }}</p>
+            </article>
           </div>
         </div>
 
@@ -858,6 +1401,8 @@ onMounted(async () => {
                 <th>上游代理</th>
                 <th>失败信息</th>
                 <th>时间</th>
+                <th>最近测试</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -878,6 +1423,23 @@ onMounted(async () => {
                   <p>成功: {{ formatTime(item.lastSuccessAt) }}</p>
                   <p>失败: {{ formatTime(item.lastFailureAt) }}</p>
                 </td>
+                <td>
+                  <template v-if="selectedUpstreamPoolTestLookup[item.id]">
+                    <span class="badge" :class="selectedUpstreamPoolTestLookup[item.id].success ? 'healthy' : 'unhealthy'">
+                      {{ selectedUpstreamPoolTestLookup[item.id].success ? '可用' : '失败' }}
+                    </span>
+                    <span v-if="selectedUpstreamPoolRetestLookup[item.id] === 'recovered'" class="badge healthy">已恢复</span>
+                    <span v-else-if="selectedUpstreamPoolRetestLookup[item.id] === 'still-failed'" class="badge unhealthy">仍失败</span>
+                    <p>时间: {{ formatTime(selectedUpstreamPoolTestLookup[item.id].testedAt) }}</p>
+                    <p>出口: {{ selectedUpstreamPoolTestLookup[item.id].exitIp ?? '未获取' }}</p>
+                    <p v-if="selectedUpstreamPoolTestLookup[item.id].elapsedMilliseconds !== null">耗时: {{ selectedUpstreamPoolTestLookup[item.id].elapsedMilliseconds }} ms</p>
+                    <p v-if="selectedUpstreamPoolTestLookup[item.id].errorMessage" class="inline-error">{{ selectedUpstreamPoolTestLookup[item.id].errorMessage }}</p>
+                  </template>
+                  <p v-else class="empty">尚未测试</p>
+                </td>
+                <td>
+                  <button class="ghost small" :disabled="busy" @click="testUpstreamProxy(item)">测试</button>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -885,15 +1447,25 @@ onMounted(async () => {
         <p v-else class="empty">请选择一个上游池查看健康状态。</p>
       </section>
 
-      <section class="panel wide">
+      <section id="fixed-entries" class="panel wide scroll-section">
         <div class="panel-head row-between">
           <div>
             <h2>固定下游代理入口</h2>
             <p>这些地址可以直接给客户端长期使用；真实出口 IP 会在池内动态变化。</p>
           </div>
-          <button class="ghost" :disabled="!runningFixedProxies.length" @click="copyRunningProxies(runningFixedProxies, '固定入口')">
-            复制运行中固定入口
-          </button>
+          <div class="panel-tools">
+            <label class="compact-field">
+              <span>轮数</span>
+              <input v-model="fixedTestForm.iterationCount" type="number" min="1" max="30" />
+            </label>
+            <label class="compact-field">
+              <span>间隔秒</span>
+              <input v-model="fixedTestForm.intervalSeconds" type="number" min="0" max="120" />
+            </label>
+            <button class="ghost" :disabled="!runningFixedProxies.length" @click="copyRunningProxies(runningFixedProxies, '固定入口')">
+              复制运行中固定入口
+            </button>
+          </div>
         </div>
 
         <div v-if="fixedProxies.length" class="table-wrap">
@@ -944,6 +1516,8 @@ onMounted(async () => {
                 </td>
                 <td>
                   <div class="action-stack">
+                    <button class="ghost" :disabled="busy || item.status !== 'Running'" @click="testFixedProxy(item)">测试</button>
+                    <button class="ghost small" :disabled="busy" @click="viewFixedProxyHistory(item)">历史</button>
                     <button v-if="item.status !== 'Running'" class="ghost" :disabled="busy" @click="startFixedProxy(item.id)">启动</button>
                     <button v-else class="ghost danger" :disabled="busy" @click="stopFixedProxy(item.id)">停止</button>
                   </div>
@@ -953,6 +1527,85 @@ onMounted(async () => {
           </table>
         </div>
         <p v-else class="empty">当前还没有任何固定下游代理入口。</p>
+      </section>
+
+      <section id="fixed-test-logs" class="panel wide scroll-section">
+        <div class="panel-head row-between">
+          <div>
+            <h2>测试日志</h2>
+            <p>服务端会缓存最近几次固定入口测试，并把是否切换过出口或上游做成摘要统计。</p>
+          </div>
+          <div class="panel-tools">
+            <label class="compact-field">
+              <span>固定入口历史</span>
+              <select v-model="selectedFixedHistoryResourceId" :disabled="busy || !fixedProxies.length" @change="changeFixedHistoryResource">
+                <option disabled value="">请选择固定入口</option>
+                <option v-for="item in fixedProxies" :key="item.id" :value="item.id">
+                  {{ item.note || item.poolId }} / {{ item.forwardedProxy || `${item.publicHost}:${item.activeListenPort || item.requestedListenPort}` }}
+                </option>
+              </select>
+            </label>
+            <button class="ghost" :disabled="busy" @click="refreshTestHistory">刷新历史</button>
+            <button class="ghost" :disabled="!selectedFixedTestResult" @click="clearFixedTestSelection">取消选中</button>
+          </div>
+        </div>
+
+        <div v-if="fixedTestHistory.length" class="history-strip">
+          <button
+            v-for="item in fixedTestHistory"
+            :key="item.runId"
+            class="history-card"
+            :class="{ selected: item.runId === selectedFixedTestRunId }"
+            @click="selectedFixedTestRunId = item.runId"
+          >
+            <strong>{{ formatTime(item.completedAt) }}</strong>
+            <span>{{ item.success ? '成功' : '存在失败' }}</span>
+            <p>{{ item.forwardedProxy ?? item.proxyDisplay }}</p>
+          </button>
+        </div>
+
+        <div v-if="selectedFixedTestResult" class="test-console">
+          <div class="test-console__summary">
+            <p>时间: {{ formatTime(selectedFixedTestResult.completedAt) }}</p>
+            <p>代理: {{ selectedFixedTestResult.forwardedProxy ?? selectedFixedTestResult.proxyDisplay }}</p>
+            <p>出口 IP: {{ selectedFixedTestResult.lastExitIp ?? '未知' }}</p>
+            <p>最近上游: {{ selectedFixedTestResult.lastSelectedUpstreamDisplay ?? '未知' }}</p>
+          </div>
+          <div v-if="selectedFixedTestResult.switchSummary" class="switch-grid">
+            <article class="switch-card" :class="selectedFixedTestResult.switchSummary.hasExitIpSwitch ? 'is-active' : 'is-muted'">
+              <span>出口是否切换</span>
+              <strong>{{ selectedFixedTestResult.switchSummary.hasExitIpSwitch ? '已发生' : '未发生' }}</strong>
+            </article>
+            <article class="switch-card" :class="selectedFixedTestResult.switchSummary.hasUpstreamSwitch ? 'is-active' : 'is-muted'">
+              <span>上游是否切换</span>
+              <strong>{{ selectedFixedTestResult.switchSummary.hasUpstreamSwitch ? '已发生' : '未发生' }}</strong>
+            </article>
+            <article class="switch-card">
+              <span>出口切换次数</span>
+              <strong>{{ selectedFixedTestResult.switchSummary.exitIpSwitchCount }}</strong>
+            </article>
+            <article class="switch-card">
+              <span>上游切换次数</span>
+              <strong>{{ selectedFixedTestResult.switchSummary.upstreamSwitchCount }}</strong>
+            </article>
+            <article class="switch-card">
+              <span>观察到的出口数</span>
+              <strong>{{ selectedFixedTestResult.switchSummary.uniqueExitIpCount }}</strong>
+            </article>
+            <article class="switch-card">
+              <span>观察到的上游数</span>
+              <strong>{{ selectedFixedTestResult.switchSummary.uniqueUpstreamCount }}</strong>
+            </article>
+          </div>
+          <div class="test-log-list">
+            <article v-for="(log, index) in selectedFixedTestResult.logs" :key="`${log.timestamp}-${index}`" class="test-log-item" :class="`is-${log.level}`">
+              <time>{{ formatTime(log.timestamp) }}</time>
+              <strong>{{ log.level.toUpperCase() }}</strong>
+              <p>{{ log.message }}</p>
+            </article>
+          </div>
+        </div>
+        <p v-else class="empty">还没有固定代理测试历史。先在“固定下游代理入口”里点击某个运行中入口的“测试”。</p>
       </section>
     </template>
   </div>

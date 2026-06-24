@@ -39,6 +39,11 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
             .ToArray();
     }
 
+    public ProxyTunnelResponse? Get(Guid id)
+    {
+        return _entries.TryGetValue(id, out var entry) ? entry.ToResponse() : null;
+    }
+
     public async Task<ImportProxiesResponse> ImportAsync(
         ImportProxiesRequest request,
         CancellationToken cancellationToken

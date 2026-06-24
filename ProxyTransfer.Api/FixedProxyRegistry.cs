@@ -29,6 +29,16 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
             .ToArray();
     }
 
+    public FixedProxyResponse? Get(Guid id)
+    {
+        if (!_entries.TryGetValue(id, out var entry))
+        {
+            return null;
+        }
+
+        return entry.ToResponse(_upstreamPools.GetPoolSnapshot(entry.PoolId));
+    }
+
     public async Task<FixedProxyResponse> AddAsync(
         FixedProxyRequest request,
         CancellationToken cancellationToken

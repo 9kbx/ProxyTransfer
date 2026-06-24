@@ -19,4 +19,9 @@ public sealed class ProxyTunnelHostOptions
     public string ProbeTargetHost { get; set; } = "example.com";
 
     public int ProbeTargetPort { get; set; } = 443;
+
+    public string TestHistoryFilePath { get; set; } = "App_Data/test-history.json";
+
+    public string UpstreamPoolTestHistoryFilePath { get; set; } =
+        "App_Data/upstream-pool-test-history.json";
 }

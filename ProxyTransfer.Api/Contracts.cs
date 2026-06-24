@@ -31,6 +31,8 @@ public sealed record StartProxyRequest(
 
 public sealed record StopBatchRequest(string BatchId);
 
+public sealed record BatchTunnelTestRequest(string BatchId, bool RunningOnly = true);
+
 public sealed record ProxyTunnelResponse(
     Guid Id,
     string? BatchId,
@@ -101,6 +103,31 @@ public sealed record ImportUpstreamPoolResponse(
     IReadOnlyList<UpstreamProxyResponse> Items
 );
 
+public sealed record UpstreamPoolTestRequest(
+    Guid? UpstreamId = null,
+    IReadOnlyList<Guid>? UpstreamIds = null
+);
+
+public sealed record UpstreamProxyTestItemResponse(
+    Guid UpstreamId,
+    string ProxyDisplay,
+    bool Success,
+    string? ExitIp,
+    long? ElapsedMilliseconds,
+    string? ErrorMessage,
+    DateTimeOffset TestedAt
+);
+
+public sealed record UpstreamPoolTestResponse(
+    Guid RunId,
+    DateTimeOffset CompletedAt,
+    string PoolId,
+    int TotalCount,
+    int SuccessCount,
+    int FailureCount,
+    IReadOnlyList<UpstreamProxyTestItemResponse> Items
+);
+
 public sealed record FixedProxyRequest(
     string PoolId,
     string? DownstreamProtocol,
@@ -133,4 +160,54 @@ public sealed record FixedProxyResponse(
     DateTimeOffset? StartedAt,
     DateTimeOffset? StoppedAt,
     string? LastError
+);
+
+public sealed record ProxyTestRequest(int? IterationCount, int? IntervalSeconds);
+
+public sealed record ProxyTestLogEntry(DateTimeOffset Timestamp, string Level, string Message);
+
+public sealed record ProxyTestSwitchSummary(
+    bool HasExitIpSwitch,
+    bool HasUpstreamSwitch,
+    int ExitIpSwitchCount,
+    int UpstreamSwitchCount,
+    int UniqueExitIpCount,
+    int UniqueUpstreamCount,
+    int SuccessfulObservationCount
+);
+
+public sealed record ProxyTestResponse(
+    Guid RunId,
+    DateTimeOffset CompletedAt,
+    string Mode,
+    Guid ResourceId,
+    string ProxyDisplay,
+    string? ForwardedProxy,
+    bool Success,
+    int SuccessCount,
+    int FailureCount,
+    string? LastExitIp,
+    string? LastSelectedUpstreamDisplay,
+    ProxyTestSwitchSummary? SwitchSummary,
+    IReadOnlyList<ProxyTestLogEntry> Logs
+);
+
+public sealed record BatchTunnelTestItemResponse(
+    Guid TunnelId,
+    string ProxyDisplay,
+    string? ForwardedProxy,
+    string Status,
+    bool Success,
+    string? ErrorMessage,
+    Guid? RunId,
+    DateTimeOffset? CompletedAt
+);
+
+public sealed record BatchTunnelTestResponse(
+    string BatchId,
+    int TotalCount,
+    int TestedCount,
+    int SuccessCount,
+    int FailureCount,
+    IReadOnlyList<BatchTunnelTestItemResponse> Items
 );
