@@ -1,9 +1,10 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 
 namespace ProxyTransfer.Tunnel;
 
-public sealed class Socks5ToSocks5Tunnel : IProxyTunnel
+public sealed class HttpProxyTunnel : IProxyTunnel
 {
     private readonly ProxyEndpoint _remoteProxy;
     private readonly TcpListener _server;
@@ -12,7 +13,7 @@ public sealed class Socks5ToSocks5Tunnel : IProxyTunnel
     private readonly Task _acceptLoopTask;
     private bool _disposed;
 
-    private Socks5ToSocks5Tunnel(
+    private HttpProxyTunnel(
         ProxyEndpoint remoteProxy,
         IPAddress listenAddress,
         int localPort,
@@ -20,14 +21,6 @@ public sealed class Socks5ToSocks5Tunnel : IProxyTunnel
         CancellationToken cancellationToken
     )
     {
-        if (!remoteProxy.IsSocks5)
-        {
-            throw new ArgumentException(
-                "Socks5ToSocks5Tunnel 仅支持 SOCKS5 上游代理。",
-                nameof(remoteProxy)
-            );
-        }
-
         _remoteProxy = remoteProxy;
         ListenAddress = listenAddress;
         PublicHost = string.IsNullOrWhiteSpace(publicHost) ? listenAddress.ToString() : publicHost;
@@ -39,7 +32,7 @@ public sealed class Socks5ToSocks5Tunnel : IProxyTunnel
             _stopRegistration = cancellationToken.Register(
                 static state =>
                 {
-                    var tunnel = (Socks5ToSocks5Tunnel)state!;
+                    var tunnel = (HttpProxyTunnel)state!;
                     tunnel._cts.Cancel();
                     tunnel._server.Stop();
                 },
@@ -58,11 +51,11 @@ public sealed class Socks5ToSocks5Tunnel : IProxyTunnel
 
     public int LocalPort { get; }
 
-    public string LocalProxyUri => $"socks5://{FormatHost(PublicHost)}:{LocalPort}";
+    public string LocalProxyUri => $"http://{FormatHost(PublicHost)}:{LocalPort}";
 
     public string RemoteProxyUri => _remoteProxy.ProxyUri;
 
-    public static Task<Socks5ToSocks5Tunnel> StartAsync(
+    public static Task<HttpProxyTunnel> StartAsync(
         ProxyEndpoint remoteProxy,
         IPAddress? listenAddress = null,
         int localPort = 0,
@@ -70,7 +63,7 @@ public sealed class Socks5ToSocks5Tunnel : IProxyTunnel
         CancellationToken cancellationToken = default
     )
     {
-        var tunnel = new Socks5ToSocks5Tunnel(
+        var tunnel = new HttpProxyTunnel(
             remoteProxy,
             listenAddress ?? IPAddress.Loopback,
             localPort,
@@ -81,11 +74,11 @@ public sealed class Socks5ToSocks5Tunnel : IProxyTunnel
         return Task.FromResult(tunnel);
     }
 
-    public static Task<Socks5ToSocks5Tunnel> StartAsync(
-        string socksHost,
-        int socksPort,
-        string? user = null,
-        string? pass = null,
+    public static Task<HttpProxyTunnel> StartAsync(
+        string proxyHost,
+        int proxyPort,
+        string user,
+        string pass,
         string listenHost = "127.0.0.1",
         int localPort = 0,
         string? publicHost = null,
@@ -98,7 +91,7 @@ public sealed class Socks5ToSocks5Tunnel : IProxyTunnel
         }
 
         return StartAsync(
-            new ProxyEndpoint(ProxyProtocol.Socks5, socksHost, socksPort, user, pass),
+            new ProxyEndpoint(ProxyProtocol.Socks5, proxyHost, proxyPort, user, pass),
             listenAddress,
             localPort,
             publicHost,
@@ -155,47 +148,32 @@ public sealed class Socks5ToSocks5Tunnel : IProxyTunnel
             await using (var clientStream = client.GetStream())
             using (var upstreamClient = new TcpClient())
             {
-                if (
-                    !await Socks5Protocol
-                        .NegotiateNoAuthAsync(clientStream, token)
-                        .ConfigureAwait(false)
-                )
+                string request = await ReadHttpHeaderAsync(clientStream, token)
+                    .ConfigureAwait(false);
+                if (!TryParseConnectTarget(request, out var targetHost, out var targetPort))
                 {
                     return;
                 }
-
-                (string targetHost, int targetPort) = await Socks5Protocol
-                    .ReadConnectRequestAsync(clientStream, token)
-                    .ConfigureAwait(false);
 
                 await upstreamClient
                     .ConnectAsync(remoteProxy.Host, remoteProxy.Port, token)
                     .ConfigureAwait(false);
                 await using var upstreamStream = upstreamClient.GetStream();
 
-                try
-                {
-                    await Socks5Protocol
-                        .EstablishUpstreamConnectionAsync(
-                            upstreamStream,
-                            remoteProxy,
-                            targetHost,
-                            targetPort,
-                            token
-                        )
-                        .ConfigureAwait(false);
-                }
-                catch
-                {
-                    await Socks5Protocol
-                        .WriteFailureResponseAsync(clientStream, 0x05, token)
-                        .ConfigureAwait(false);
-                    throw;
-                }
-
-                await Socks5Protocol
-                    .WriteSuccessResponseAsync(clientStream, token)
+                await ProxyUpstreamConnector
+                    .EstablishConnectionAsync(
+                        upstreamStream,
+                        remoteProxy,
+                        targetHost,
+                        targetPort,
+                        token
+                    )
                     .ConfigureAwait(false);
+
+                var responseBytes = Encoding.ASCII.GetBytes(
+                    "HTTP/1.1 200 Connection Established\r\n\r\n"
+                );
+                await clientStream.WriteAsync(responseBytes, token).ConfigureAwait(false);
 
                 var upstreamTask = clientStream.CopyToAsync(upstreamStream, token);
                 var downstreamTask = upstreamStream.CopyToAsync(clientStream, token);
@@ -203,9 +181,57 @@ public sealed class Socks5ToSocks5Tunnel : IProxyTunnel
             }
         }
         catch (OperationCanceledException) { }
-        catch (IOException) { }
-        catch (SocketException) { }
-        catch (InvalidOperationException) { }
+    }
+
+    private static async Task<string> ReadHttpHeaderAsync(
+        NetworkStream clientStream,
+        CancellationToken token
+    )
+    {
+        var buffer = new byte[1024];
+        var builder = new StringBuilder();
+
+        while (!builder.ToString().Contains("\r\n\r\n", StringComparison.Ordinal))
+        {
+            int bytesRead = await clientStream.ReadAsync(buffer, token).ConfigureAwait(false);
+            if (bytesRead == 0)
+            {
+                throw new IOException("客户端在发送完整 HTTP 请求头前断开。");
+            }
+
+            builder.Append(Encoding.ASCII.GetString(buffer, 0, bytesRead));
+            if (builder.Length > 16 * 1024)
+            {
+                throw new InvalidOperationException("HTTP 请求头过大，已拒绝处理。");
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private static bool TryParseConnectTarget(string request, out string host, out int port)
+    {
+        host = string.Empty;
+        port = 0;
+
+        var firstLine = request.Split("\r\n", 2, StringSplitOptions.None)[0];
+        var parts = firstLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (
+            parts.Length < 2
+            || !string.Equals(parts[0], "CONNECT", StringComparison.OrdinalIgnoreCase)
+        )
+        {
+            return false;
+        }
+
+        var separatorIndex = parts[1].LastIndexOf(':');
+        if (separatorIndex <= 0)
+        {
+            return false;
+        }
+
+        host = parts[1][..separatorIndex];
+        return int.TryParse(parts[1][(separatorIndex + 1)..], out port);
     }
 
     private static string FormatHost(string host) =>

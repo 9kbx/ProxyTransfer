@@ -39,8 +39,8 @@ logger.LogInformation(
 var tunnelStartTimestamp = DateTimeOffset.Now;
 var tunnelStartStopwatch = Stopwatch.StartNew();
 
-await using var httpTunnel = await Socks5ToHttpTunnel.StartAsync(httpProxyEndpoint);
-await using var socks5Tunnel = await Socks5ToSocks5Tunnel.StartAsync(socks5ProxyEndpoint);
+await using var httpTunnel = await HttpProxyTunnel.StartAsync(httpProxyEndpoint);
+await using var socks5Tunnel = await Socks5ProxyTunnel.StartAsync(socks5ProxyEndpoint);
 
 tunnelStartStopwatch.Stop();
 logger.LogInformation(
@@ -89,7 +89,10 @@ try
 finally
 {
     logger.LogInformation("[代理] 开始关闭本地中转服务: {LocalProxyUri}", httpTunnel.LocalProxyUri);
-    logger.LogInformation("[代理] 开始关闭本地中转服务: {LocalProxyUri}", socks5Tunnel.LocalProxyUri);
+    logger.LogInformation(
+        "[代理] 开始关闭本地中转服务: {LocalProxyUri}",
+        socks5Tunnel.LocalProxyUri
+    );
 }
 
 static string ResolveProxyFilePath()
@@ -149,12 +152,8 @@ static bool TryParseProxyEndpoint(string value, out ProxyEndpoint endpoint)
         endpoint = ProxyEndpoint.Parse(value);
         return true;
     }
-    catch (FormatException)
-    {
-    }
-    catch (ArgumentException)
-    {
-    }
+    catch (FormatException) { }
+    catch (ArgumentException) { }
 
     endpoint = default!;
     return false;

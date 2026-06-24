@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 
 type TunnelRecord = {
   id: string
@@ -65,83 +65,34 @@ const errorMessage = ref('')
 const runningCount = computed(() => tunnels.value.filter((item) => item.status === 'Running').length)
 const stoppedCount = computed(() => tunnels.value.filter((item) => item.status === 'Stopped').length)
 const errorCount = computed(() => tunnels.value.filter((item) => item.status === 'Error').length)
-
-function normalizeProxyLines(value: string) {
-  return value
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith('#'))
-}
-
-function detectProxyProtocol(value: string): 'http' | 'socks5' | 'unknown' {
-  const trimmed = value.trim()
-  if (!trimmed) {
-    return 'unknown'
-  }
-
-  if (/^socks5:\/\//i.test(trimmed)) {
-    return 'socks5'
-  }
-
-  if (/^http:\/\//i.test(trimmed)) {
-    return 'http'
-  }
-
-  if (trimmed.includes('://')) {
-    return 'unknown'
-  }
-
-  return 'http'
-}
-
-const manualUpstreamProtocol = computed(() => detectProxyProtocol(manualForm.proxy))
-
-const importUpstreamProtocols = computed(() =>
-  normalizeProxyLines(importForm.proxyText).map((line) => detectProxyProtocol(line)),
+const runningForwardedProxies = computed(() =>
+  tunnels.value
+    .filter((item) => item.status === 'Running' && item.forwardedProxy)
+    .map((item) => item.forwardedProxy as string),
 )
-
-const manualSupportsSocks5Downstream = computed(() => manualUpstreamProtocol.value === 'socks5')
-
-const importSupportsSocks5Downstream = computed(() => {
-  const protocols = importUpstreamProtocols.value
-  return protocols.length > 0 && protocols.every((protocol) => protocol === 'socks5')
-})
 
 const manualDownstreamHint = computed(() => {
   if (!manualForm.proxy.trim()) {
-    return '只有上游为 SOCKS5 时，才能选择下游 SOCKS5。'
+    return '上游支持 HTTP 和 SOCKS5；下游可以选择 HTTP 或 SOCKS5。'
   }
 
-  if (manualSupportsSocks5Downstream.value) {
-    return '当前上游为 SOCKS5，可以选择下游 HTTP 或 SOCKS5。'
+  if (manualForm.downstreamProtocol === 'socks5') {
+    return '当前会创建无认证 SOCKS5 下游出口；上游可以是 HTTP 或 SOCKS5。'
   }
 
-  return '当前上游会按 HTTP 处理，因此下游只能选择 HTTP。'
+  return '当前会创建无认证 HTTP 下游出口；上游可以是 HTTP 或 SOCKS5。'
 })
 
 const importDownstreamHint = computed(() => {
-  const protocols = importUpstreamProtocols.value
-  if (protocols.length === 0) {
-    return '批量导入时，只有每一行上游都显式为 socks5://...，才能选择下游 SOCKS5。'
+  if (!importForm.proxyText.trim()) {
+    return '批量导入支持 HTTP 和 SOCKS5 上游；下游可以统一选择 HTTP 或 SOCKS5。'
   }
 
-  if (importSupportsSocks5Downstream.value) {
-    return '当前批次的上游全部为 SOCKS5，可以选择下游 HTTP 或 SOCKS5。'
+  if (importForm.downstreamProtocol === 'socks5') {
+    return '当前批次会统一创建无认证 SOCKS5 下游出口；每一行上游可以是 HTTP 或 SOCKS5。'
   }
 
-  return '批次中只要包含 HTTP 上游，或未写 scheme 的代理行，系统就会限制为下游 HTTP。'
-})
-
-watch(manualSupportsSocks5Downstream, (supported) => {
-  if (!supported && manualForm.downstreamProtocol === 'socks5') {
-    manualForm.downstreamProtocol = 'http'
-  }
-})
-
-watch(importSupportsSocks5Downstream, (supported) => {
-  if (!supported && importForm.downstreamProtocol === 'socks5') {
-    importForm.downstreamProtocol = 'http'
-  }
+  return '当前批次会统一创建无认证 HTTP 下游出口；每一行上游可以是 HTTP 或 SOCKS5。'
 })
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -323,6 +274,19 @@ async function copyProxy(value: string | null) {
   }
 }
 
+async function copyRunningProxies() {
+  if (!runningForwardedProxies.value.length) {
+    return
+  }
+
+  try {
+    await navigator.clipboard.writeText(runningForwardedProxies.value.join('\n'))
+    statusMessage.value = `已复制 ${runningForwardedProxies.value.length} 个运行中代理，可直接粘贴到 ProxyTransfer.Tunnel.Test/proxy.txt`
+  } catch {
+    errorMessage.value = '复制失败，请手动复制。'
+  }
+}
+
 function formatTime(value: string | null) {
   if (!value) {
     return '未发生'
@@ -374,7 +338,7 @@ onMounted(loadData)
       <section class="panel">
         <div class="panel-head">
           <h2>批量导入 proxy.txt</h2>
-          <p>每行一个代理，支持 http://user:pass@host:port、socks5://user:pass@host:port；如果省略 scheme，系统会按 HTTP 上游处理。</p>
+          <p>每行一个代理，支持 http://user:pass@host:port、socks5://user:pass@host:port；如果省略 scheme，系统会按 HTTP 上游处理，但下游仍可选 HTTP 或 SOCKS5。</p>
         </div>
 
         <textarea
@@ -388,9 +352,9 @@ onMounted(loadData)
             <span>下游出口协议</span>
             <select v-model="importForm.downstreamProtocol">
               <option value="http">HTTP</option>
-              <option :disabled="!importSupportsSocks5Downstream" value="socks5">SOCKS5</option>
+              <option value="socks5">SOCKS5</option>
             </select>
-            <small class="field-help" :class="{ warning: !importSupportsSocks5Downstream }">{{ importDownstreamHint }}</small>
+            <small class="field-help">{{ importDownstreamHint }}</small>
           </label>
           <label>
             <span>批次号</span>
@@ -431,13 +395,13 @@ onMounted(loadData)
           <label>
             <span>代理</span>
             <input v-model="manualForm.proxy" placeholder="http://user:pass@host:port" />
-            <small class="field-help" :class="{ warning: manualUpstreamProtocol !== 'socks5' }">{{ manualDownstreamHint }}</small>
+            <small class="field-help">{{ manualDownstreamHint }}</small>
           </label>
           <label>
             <span>下游出口协议</span>
             <select v-model="manualForm.downstreamProtocol">
               <option value="http">HTTP</option>
-              <option :disabled="!manualSupportsSocks5Downstream" value="socks5">SOCKS5</option>
+              <option value="socks5">SOCKS5</option>
             </select>
           </label>
           <label>
@@ -497,6 +461,9 @@ onMounted(loadData)
           <h2>转发实例</h2>
           <p>运行中的 forwarded proxy 就是可以复制给客户端的无账号密码 HTTP 或 SOCKS5 代理。</p>
         </div>
+        <button class="ghost" :disabled="!runningForwardedProxies.length" @click="copyRunningProxies">
+          复制运行中代理
+        </button>
       </div>
 
       <div v-if="tunnels.length" class="table-wrap">

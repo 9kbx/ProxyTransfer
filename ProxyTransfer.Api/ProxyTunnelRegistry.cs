@@ -298,11 +298,6 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
 
         if (value == Socks5DownstreamProtocol)
         {
-            if (!remoteProxy.IsSocks5)
-            {
-                throw new InvalidOperationException("下游 SOCKS5 出口仅支持 SOCKS5 上游代理。");
-            }
-
             return value;
         }
 
@@ -339,7 +334,7 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
         CancellationToken cancellationToken
     )
     {
-        return await Socks5ToHttpTunnel
+        return await HttpProxyTunnel
             .StartAsync(
                 entry.RemoteProxy,
                 listenAddress,
@@ -356,7 +351,7 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
         CancellationToken cancellationToken
     )
     {
-        return await Socks5ToSocks5Tunnel
+        return await Socks5ProxyTunnel
             .StartAsync(
                 entry.RemoteProxy,
                 listenAddress,

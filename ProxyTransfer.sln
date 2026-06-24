@@ -6,6 +6,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProxyTransfer.Tunnel", "Pro
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProxyTransfer.Api", "ProxyTransfer.Api\ProxyTransfer.Api.csproj", "{703E6125-A620-4259-84E7-AEF03745A32D}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProxyTransfer.Tunnel.Test", "ProxyTransfer.Tunnel.Test\ProxyTransfer.Tunnel.Test.csproj", "{29005666-8957-4F31-9D2D-B42B874A8EC0}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -52,6 +54,18 @@ Global
 		{703E6125-A620-4259-84E7-AEF03745A32D}.Release|x64.Build.0 = Release|Any CPU
 		{703E6125-A620-4259-84E7-AEF03745A32D}.Release|x86.ActiveCfg = Release|Any CPU
 		{703E6125-A620-4259-84E7-AEF03745A32D}.Release|x86.Build.0 = Release|Any CPU
+		{29005666-8957-4F31-9D2D-B42B874A8EC0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{29005666-8957-4F31-9D2D-B42B874A8EC0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{29005666-8957-4F31-9D2D-B42B874A8EC0}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{29005666-8957-4F31-9D2D-B42B874A8EC0}.Debug|x64.Build.0 = Debug|Any CPU
+		{29005666-8957-4F31-9D2D-B42B874A8EC0}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{29005666-8957-4F31-9D2D-B42B874A8EC0}.Debug|x86.Build.0 = Debug|Any CPU
+		{29005666-8957-4F31-9D2D-B42B874A8EC0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{29005666-8957-4F31-9D2D-B42B874A8EC0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{29005666-8957-4F31-9D2D-B42B874A8EC0}.Release|x64.ActiveCfg = Release|Any CPU
+		{29005666-8957-4F31-9D2D-B42B874A8EC0}.Release|x64.Build.0 = Release|Any CPU
+		{29005666-8957-4F31-9D2D-B42B874A8EC0}.Release|x86.ActiveCfg = Release|Any CPU
+		{29005666-8957-4F31-9D2D-B42B874A8EC0}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
