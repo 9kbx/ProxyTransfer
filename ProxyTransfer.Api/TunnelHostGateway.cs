@@ -271,6 +271,13 @@ internal sealed class TunnelHostGateway
         return stopped is null || stopped.Kind != "pool" ? null : MapFixed(stopped);
     }
 
+    public async Task<bool> DeleteFixedAsync(Guid id, CancellationToken cancellationToken)
+    {
+        // 先停止再删除，确保下游连接被关闭
+        await StopFixedAsync(id, cancellationToken).ConfigureAwait(false);
+        return await _client.DeleteAsync(id, cancellationToken).ConfigureAwait(false);
+    }
+
     private ProxyTunnelResponse MapDirect(TunnelHostInstanceResponse instance)
     {
         return new ProxyTunnelResponse(

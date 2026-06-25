@@ -86,6 +86,33 @@ internal sealed class TunnelHostApiClient
         );
     }
 
+    public Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken)
+    {
+        return SendDeleteAsync($"/api/instances/{id}", cancellationToken);
+    }
+
+    private async Task<bool> SendDeleteAsync(
+        string relativeUrl,
+        CancellationToken cancellationToken
+    )
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Delete, relativeUrl);
+        using var response = await _httpClient
+            .SendAsync(request, cancellationToken)
+            .ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            await ThrowForFailureAsync(response, cancellationToken).ConfigureAwait(false);
+        }
+
+        return true;
+    }
+
     private async Task<TResponse> SendAsync<TResponse>(
         HttpMethod method,
         string relativeUrl,

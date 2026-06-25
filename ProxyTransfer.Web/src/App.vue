@@ -905,6 +905,20 @@ async function stopFixedProxy(id: string) {
   })
 }
 
+async function deleteFixedProxy(id: string) {
+  if (!confirm('确定要删除该固定下游代理入口吗？删除前会自动停止。')) {
+    return
+  }
+
+  await withBusy(async () => {
+    await apiFetch<{ id: string; deleted: boolean }>(`/api/fixed-proxies/${id}`, {
+      method: 'DELETE',
+    })
+    statusMessage.value = '固定入口已删除。'
+    await loadFixedData()
+  })
+}
+
 async function testTunnel(item: TunnelRecord) {
   await withBusy(async () => {
     const result = await apiFetch<ProxyTestResult>(`/api/tunnels/${item.id}/test`, {
@@ -1838,6 +1852,7 @@ onMounted(async () => {
                     <button class="ghost small" :disabled="busy" @click="viewFixedProxyHistory(item)">历史</button>
                     <button v-if="item.status !== 'Running'" class="ghost" :disabled="busy" @click="startFixedProxy(item.id)">启动</button>
                     <button v-else class="ghost danger" :disabled="busy" @click="stopFixedProxy(item.id)">停止</button>
+                    <button class="ghost danger" :disabled="busy" @click="deleteFixedProxy(item.id)">删除</button>
                   </div>
                 </td>
               </tr>
