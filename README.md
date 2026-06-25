@@ -196,7 +196,12 @@ npm run build
 
 ### 5. 发布到远程服务器
 
-仓库内提供了 [scripts/publish_to_remote.sh](scripts/publish_to_remote.sh) 脚本，用于一次性完成这些步骤：
+仓库内提供了两个发布脚本：
+
+- [scripts/publish_web.sh](scripts/publish_web.sh)：发布 API + Web 管理台容器
+- [scripts/publish_tunnel.sh](scripts/publish_tunnel.sh)：发布独立 TunnelHost 容器
+
+其中 [scripts/publish_web.sh](scripts/publish_web.sh) 会完成这些步骤：
 
 - 构建 [ProxyTransfer.Web](ProxyTransfer.Web) 前端
 - 发布 [ProxyTransfer.Api](ProxyTransfer.Api) 后端
@@ -205,33 +210,53 @@ npm run build
 - 在远端基于发布目录执行 `docker build`
 - 停掉旧容器并重新 `docker run`
 
+[scripts/publish_tunnel.sh](scripts/publish_tunnel.sh) 的发布方式与 API 项目相同，但不会复制静态前端页面，只发布 [ProxyTransfer.TunnelHost](ProxyTransfer.TunnelHost) 宿主进程。
+
+两个发布脚本还会在各自远端目录生成可直接执行的重启脚本：
+
+- Web/API 目录生成 `restart_web.sh`
+- TunnelHost 目录生成 `restart_tunnel.sh`
+
+运维可以直接在服务器执行这些脚本完成容器重启，而不需要再次从开发机执行发布脚本。如果配置了 `CONTAINER_NETWORK`，脚本也会先确保远端 Docker 网络存在，再让两个容器加入同一个网络。
+
 使用方式：
 
 1. 复制 [scripts/.env.example](scripts/.env.example) 为 `scripts/.env`
-2. 按你的服务器信息修改 `REMOTE_HOST`、`REMOTE_USER`、`REMOTE_PATH`
-3. 在远端服务器上创建运行时配置文件，路径与 `REMOTE_RUNTIME_ENV_PATH` 对应；可以参考 [scripts/remote.runtime.env.example](scripts/remote.runtime.env.example)
+2. 按你的服务器信息修改 `REMOTE_HOST`、`REMOTE_USER`，以及 `WEB_REMOTE_*` / `TUNNEL_REMOTE_*` 这些发布目标配置
+3. 在远端服务器上创建运行时配置文件：
+  Web 容器可参考 [scripts/remote.runtime.env.example](scripts/remote.runtime.env.example)
+  TunnelHost 容器可参考 `scripts/remote.tunnel.runtime.env.example`
 4. 在仓库根目录执行：
 
 ```bash
-./scripts/publish_to_remote.sh
+./scripts/publish_web.sh
+```
+
+发布 TunnelHost 时执行：
+
+```bash
+./scripts/publish_tunnel.sh
 ```
 
 如果需要指定其它配置文件路径，也可以执行：
 
 ```bash
-./scripts/publish_to_remote.sh /path/to/your.env
+./scripts/publish_web.sh /path/to/your.env
+./scripts/publish_tunnel.sh /path/to/your.env
 ```
 
 容器配置说明：
 
 - 本地 [scripts/.env.example](scripts/.env.example) 只保留发布目标、镜像名、容器名等部署标识
-- 远端 [scripts/remote.runtime.env.example](scripts/remote.runtime.env.example) 对应的是服务器运行时参数，例如端口映射、目录挂载、容器环境变量
+- 远端 [scripts/remote.runtime.env.example](scripts/remote.runtime.env.example) 对应 Web 容器的运行时参数，例如端口映射、目录挂载、容器环境变量
+- `scripts/remote.tunnel.runtime.env.example` 对应 TunnelHost 容器的运行时参数
+- `CONTAINER_NETWORK`：两个容器共享的 Docker 网络名；若不存在，发布脚本和远端重启脚本会自动创建
 - `CONTAINER_PORTS`：多个 `-p` 映射，使用 `|` 分隔
 - `CONTAINER_VOLUMES`：多个 `-v` 映射，使用 `|` 分隔
 - `CONTAINER_ENVS`：多个 `-e` 环境变量，使用 `|` 分隔
 - `CONTAINER_EXTRA_ARGS`：追加原始 `docker run` 参数，使用 `|` 分隔
 
-[ProxyTransfer.Api/Dockerfile](ProxyTransfer.Api/Dockerfile) 是运行时镜像 Dockerfile，脚本会自动把它复制到 API 发布目录后再上传，因此远端只需要收到发布产物，不需要源码仓库。
+[ProxyTransfer.Api/Dockerfile](ProxyTransfer.Api/Dockerfile) 和 [ProxyTransfer.TunnelHost/Dockerfile](ProxyTransfer.TunnelHost/Dockerfile) 是运行时镜像 Dockerfile，脚本会自动把它们复制到各自发布目录后再上传，因此远端只需要收到发布产物，不需要源码仓库。
 
 ## 使用方式
 
