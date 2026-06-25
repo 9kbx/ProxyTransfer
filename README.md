@@ -212,12 +212,12 @@ npm run build
 
 [scripts/publish_tunnel.sh](scripts/publish_tunnel.sh) 的发布方式与 API 项目相同，但不会复制静态前端页面，只发布 [ProxyTransfer.TunnelHost](ProxyTransfer.TunnelHost) 宿主进程。
 
-两个发布脚本还会在各自远端目录生成可直接执行的重启脚本：
+发布脚本还会把独立的容器重启脚本一并同步到远端目录，放在服务器上直接执行：
 
-- Web/API 目录生成 `restart_web.sh`
-- TunnelHost 目录生成 `restart_tunnel.sh`
+- Web/API 目录下放置 [scripts/restart_web.sh](scripts/restart_web.sh)
+- TunnelHost 目录下放置 [scripts/restart_tunnel.sh](scripts/restart_tunnel.sh)
 
-运维可以直接在服务器执行这些脚本完成容器重启，而不需要再次从开发机执行发布脚本。如果配置了 `CONTAINER_NETWORK`，脚本也会先确保远端 Docker 网络存在，再让两个容器加入同一个网络。
+运维可以在服务器上直接运行这些脚本完成容器重启（会先 `docker build` 再 `docker run`），无需从开发机重新发布。脚本会自动读取远端对应的运行时配置文件（如 `/apps/proxytransfer/config/web.runtime.env`），并确保 Docker 网络存在后再让容器加入同一网络。
 
 使用方式：
 

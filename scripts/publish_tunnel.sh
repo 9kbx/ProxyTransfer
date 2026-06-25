@@ -73,32 +73,80 @@ split_delimited_values() {
 	done
 }
 
-generate_restart_script() {
-	local script_path="$1"
-	local remote_container_name_literal remote_image_name_literal remote_runtime_env_path_literal
-	local remote_container_restart_literal remote_docker_bin_literal remote_container_ports_literal
-	local remote_container_volumes_literal remote_container_envs_literal remote_container_network_literal
-	local remote_container_extra_args_literal
+[[ -f "$ENV_FILE" ]] || fail "未找到配置文件: $ENV_FILE"
 
-	remote_container_name_literal="$(printf '%q' "$REMOTE_CONTAINER_NAME")"
-	remote_image_name_literal="$(printf '%q' "$REMOTE_IMAGE_NAME")"
-	remote_runtime_env_path_literal="$(printf '%q' "$REMOTE_RUNTIME_ENV_PATH")"
-	remote_container_restart_literal="$(printf '%q' "$CONTAINER_RESTART")"
-	remote_docker_bin_literal="$(printf '%q' "$DOCKER_BIN")"
-	remote_container_ports_literal="$(printf '%q' "${CONTAINER_PORTS:-}")"
-	remote_container_volumes_literal="$(printf '%q' "${CONTAINER_VOLUMES:-}")"
-	remote_container_envs_literal="$(printf '%q' "${CONTAINER_ENVS:-}")"
-	remote_container_network_literal="$(printf '%q' "${CONTAINER_NETWORK:-}")"
-	remote_container_extra_args_literal="$(printf '%q' "${CONTAINER_EXTRA_ARGS:-}")"
+load_env_file "$ENV_FILE"
 
-	cat > "$script_path" <<EOF
-#!/usr/bin/env bash
+require_command dotnet
+require_command rsync
+require_command ssh
 
+TUNNEL_PROJECT_PATH="${TUNNEL_PROJECT_PATH:-$ROOT_DIR/ProxyTransfer.TunnelHost/ProxyTransfer.TunnelHost.csproj}"
+TUNNEL_PROJECT_DIR="$(cd -- "$(dirname -- "$TUNNEL_PROJECT_PATH")" && pwd)"
+TUNNEL_DOCKERFILE_PATH="${TUNNEL_DOCKERFILE_PATH:-$TUNNEL_PROJECT_DIR/Dockerfile}"
+PUBLISH_CONFIGURATION="${PUBLISH_CONFIGURATION:-Release}"
+PUBLISH_DIR="${PUBLISH_DIR:-$ROOT_DIR/.artifacts/publish/tunnel}"
+REMOTE_PORT="${REMOTE_PORT:-22}"
+REMOTE_DOCKERFILE_NAME="${REMOTE_DOCKERFILE_NAME:-Dockerfile}"
+REMOTE_IMAGE_NAME="${TUNNEL_REMOTE_IMAGE_NAME:-proxytransfer-tunnel:latest}"
+REMOTE_CONTAINER_NAME="${TUNNEL_REMOTE_CONTAINER_NAME:-proxytransfer-tunnel}"
+REMOTE_PATH="${TUNNEL_REMOTE_PATH:-/apps/proxytransfer/tunnel}"
+REMOTE_RUNTIME_ENV_PATH="${TUNNEL_REMOTE_RUNTIME_ENV_PATH:-/apps/proxytransfer/config/tunnel.runtime.env}"
+CONTAINER_RESTART="${CONTAINER_RESTART:-unless-stopped}"
+DOCKER_BIN="${DOCKER_BIN:-docker}"
+RSYNC_DELETE="${RSYNC_DELETE:-true}"
+
+require_env REMOTE_HOST
+require_env REMOTE_USER
+require_env REMOTE_PATH
+
+REMOTE_DOCKER_CONTEXT="${REMOTE_DOCKER_CONTEXT:-$REMOTE_PATH}"
+
+[[ -f "$TUNNEL_DOCKERFILE_PATH" ]] || fail "未找到 Dockerfile: $TUNNEL_DOCKERFILE_PATH"
+
+remote_target="$REMOTE_USER@$REMOTE_HOST"
+ssh_args=(-p "$REMOTE_PORT")
+rsync_args=(-az)
+
+if [[ -n "${SSH_EXTRA_ARGS:-}" ]]; then
+	IFS='|' read -r -a ssh_extra_parts <<< "$SSH_EXTRA_ARGS"
+	ssh_args+=("${ssh_extra_parts[@]}")
+	rsync_args+=("-e" "ssh $(printf '%q ' "${ssh_args[@]}")")
+else
+	rsync_args+=("-e" "ssh -p $REMOTE_PORT")
+fi
+
+if [[ "$RSYNC_DELETE" == "true" ]]; then
+	rsync_args+=(--delete)
+fi
+
+log "发布 TunnelHost"
+rm -rf "$PUBLISH_DIR"
+dotnet publish "$TUNNEL_PROJECT_PATH" -c "$PUBLISH_CONFIGURATION" -o "$PUBLISH_DIR"
+cp "$TUNNEL_DOCKERFILE_PATH" "$PUBLISH_DIR/$REMOTE_DOCKERFILE_NAME"
+
+# 复制独立重启脚本到发布目录，方便运维在服务器上直接执行
+cp "$SCRIPT_DIR/restart_tunnel.sh" "$PUBLISH_DIR/"
+
+log "同步发布目录到远端"
+ssh "${ssh_args[@]}" "$remote_target" "mkdir -p $(printf '%q' "$REMOTE_PATH")"
+rsync "${rsync_args[@]}" "$PUBLISH_DIR/" "$remote_target:$REMOTE_PATH/"
+remote_container_name_literal="$(printf '%q' "$REMOTE_CONTAINER_NAME")"
+remote_image_name_literal="$(printf '%q' "$REMOTE_IMAGE_NAME")"
+remote_dockerfile_name_literal="$(printf '%q' "$REMOTE_DOCKERFILE_NAME")"
+remote_docker_context_literal="$(printf '%q' "$REMOTE_DOCKER_CONTEXT")"
+remote_runtime_env_path_literal="$(printf '%q' "$REMOTE_RUNTIME_ENV_PATH")"
+remote_container_restart_literal="$(printf '%q' "$CONTAINER_RESTART")"
+remote_docker_bin_literal="$(printf '%q' "$DOCKER_BIN")"
+remote_container_ports_literal="$(printf '%q' "${CONTAINER_PORTS:-}")"
+remote_container_volumes_literal="$(printf '%q' "${CONTAINER_VOLUMES:-}")"
+remote_container_envs_literal="$(printf '%q' "${CONTAINER_ENVS:-}")"
+remote_container_network_literal="$(printf '%q' "${CONTAINER_NETWORK:-}")"
+remote_container_extra_args_literal="$(printf '%q' "${CONTAINER_EXTRA_ARGS:-}")"
+
+log "远端构建镜像并启动容器"
+ssh "${ssh_args[@]}" "$remote_target" /bin/bash <<EOF
 set -Eeuo pipefail
-
-log() {
-	printf '[restart-tunnel] %s\n' "\$*"
-}
 
 trim_whitespace() {
 	local value="\$1"
@@ -112,11 +160,11 @@ load_env_file() {
 	local line key value quote_char
 
 	while IFS= read -r line || [[ -n "\$line" ]]; do
-		line="\${line%\$'\r'}"
+		line="\${line%\$'\\r'}"
 		[[ -n "\$line" ]] || continue
 		[[ "\$line" =~ ^[[:space:]]*# ]] && continue
 		[[ "\$line" == *=* ]] || {
-			printf '[restart-tunnel] 远端运行时配置无效: %s\n' "\$line" >&2
+			printf '[publish-tunnel] 远端运行时配置无效: %s\n' "\$line" >&2
 			return 1
 		}
 
@@ -126,7 +174,7 @@ load_env_file() {
 		value="\$(trim_whitespace "\$value")"
 
 		[[ "\$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
-			printf '[restart-tunnel] 远端运行时配置键无效: %s\n' "\$key" >&2
+			printf '[publish-tunnel] 远端运行时配置键无效: %s\n' "\$key" >&2
 			return 1
 		}
 
@@ -134,7 +182,7 @@ load_env_file() {
 			quote_char="\${value:0:1}"
 			if [[ "\$quote_char" == '"' || "\$quote_char" == "'" ]]; then
 				if [[ "\${value: -1}" != "\$quote_char" ]]; then
-					printf '[restart-tunnel] 远端运行时配置引号不匹配: %s\n' "\$key" >&2
+					printf '[publish-tunnel] 远端运行时配置引号不匹配: %s\n' "\$key" >&2
 					return 1
 				fi
 				value="\${value:1:\${#value}-2}"
@@ -156,12 +204,18 @@ split_delimited_values() {
 	done
 }
 
-ensure_network_exists() {
-	local docker_bin="\$1"
-	local network_name="\$2"
-	[[ -n "\$network_name" ]] || return 0
-	"\$docker_bin" network inspect "\$network_name" >/dev/null 2>&1 || "\$docker_bin" network create "\$network_name" >/dev/null
-}
+REMOTE_CONTAINER_NAME_VALUE=$remote_container_name_literal
+REMOTE_IMAGE_NAME_VALUE=$remote_image_name_literal
+REMOTE_DOCKERFILE_NAME_VALUE=$remote_dockerfile_name_literal
+REMOTE_DOCKER_CONTEXT_VALUE=$remote_docker_context_literal
+REMOTE_RUNTIME_ENV_PATH_VALUE=$remote_runtime_env_path_literal
+CONTAINER_RESTART=$remote_container_restart_literal
+DOCKER_BIN=$remote_docker_bin_literal
+CONTAINER_PORTS=$remote_container_ports_literal
+CONTAINER_VOLUMES=$remote_container_volumes_literal
+CONTAINER_ENVS=$remote_container_envs_literal
+CONTAINER_NETWORK=$remote_container_network_literal
+CONTAINER_EXTRA_ARGS=$remote_container_extra_args_literal
 
 check_remote_port_conflicts() {
 	local container_name="\$1"
@@ -173,7 +227,7 @@ check_remote_port_conflicts() {
 
 	[[ -n "\$port_specs" ]] || return 0
 	command -v ss >/dev/null 2>&1 || {
-		printf '[restart-tunnel] 远端缺少 ss，跳过端口占用预检。\n' >&2
+		printf '[publish-tunnel] 远端缺少 ss，跳过端口占用预检。\n' >&2
 		return 0
 	}
 
@@ -222,70 +276,54 @@ check_remote_port_conflicts() {
 	done
 
 	if [[ "\${#conflicts[@]}" -gt 0 ]]; then
-		printf '[restart-tunnel] 远端端口冲突，容器未启动。请调整 CONTAINER_PORTS 或释放这些端口：\n' >&2
+		printf '[publish-tunnel] 远端端口冲突，容器未启动。请调整 CONTAINER_PORTS 或释放这些端口：\n' >&2
 		printf '  - %s\n' "\${conflicts[@]}" >&2
 		return 1
 	fi
 }
 
-REMOTE_CONTAINER_NAME_VALUE=$remote_container_name_literal
-REMOTE_IMAGE_NAME_VALUE=$remote_image_name_literal
-REMOTE_RUNTIME_ENV_PATH_VALUE=$remote_runtime_env_path_literal
-CONTAINER_RESTART_DEFAULT=$remote_container_restart_literal
-DOCKER_BIN_DEFAULT=$remote_docker_bin_literal
-CONTAINER_PORTS_DEFAULT=$remote_container_ports_literal
-CONTAINER_VOLUMES_DEFAULT=$remote_container_volumes_literal
-CONTAINER_ENVS_DEFAULT=$remote_container_envs_literal
-CONTAINER_NETWORK_DEFAULT=$remote_container_network_literal
-CONTAINER_EXTRA_ARGS_DEFAULT=$remote_container_extra_args_literal
-
 if [[ -n "\$REMOTE_RUNTIME_ENV_PATH_VALUE" ]]; then
 	[[ -f "\$REMOTE_RUNTIME_ENV_PATH_VALUE" ]] || {
-		printf '[restart-tunnel] 未找到远端运行时配置文件: %s\n' "\$REMOTE_RUNTIME_ENV_PATH_VALUE" >&2
+		printf '[publish-tunnel] 未找到远端运行时配置文件: %s\n' "\$REMOTE_RUNTIME_ENV_PATH_VALUE" >&2
 		exit 1
 	}
 	load_env_file "\$REMOTE_RUNTIME_ENV_PATH_VALUE"
 fi
 
-DOCKER_BIN="\${DOCKER_BIN:-\$DOCKER_BIN_DEFAULT}"
-CONTAINER_RESTART="\${CONTAINER_RESTART:-\$CONTAINER_RESTART_DEFAULT}"
-CONTAINER_PORTS="\${CONTAINER_PORTS:-\$CONTAINER_PORTS_DEFAULT}"
-CONTAINER_VOLUMES="\${CONTAINER_VOLUMES:-\$CONTAINER_VOLUMES_DEFAULT}"
-CONTAINER_ENVS="\${CONTAINER_ENVS:-\$CONTAINER_ENVS_DEFAULT}"
-CONTAINER_NETWORK="\${CONTAINER_NETWORK:-\$CONTAINER_NETWORK_DEFAULT}"
-CONTAINER_EXTRA_ARGS="\${CONTAINER_EXTRA_ARGS:-\$CONTAINER_EXTRA_ARGS_DEFAULT}"
-
-ensure_network_exists "\$DOCKER_BIN" "\$CONTAINER_NETWORK"
+DOCKER_BIN="\${DOCKER_BIN:-docker}"
+CONTAINER_RESTART="\${CONTAINER_RESTART:-unless-stopped}"
 
 docker_run_args=(run -d --name "\$REMOTE_CONTAINER_NAME_VALUE" --restart "\$CONTAINER_RESTART")
 
-if [[ -n "\$CONTAINER_PORTS" ]]; then
+# 确保 Docker 网络存在
+if [[ -n "\${CONTAINER_NETWORK:-}" ]]; then
+	"\$DOCKER_BIN" network inspect "\$CONTAINER_NETWORK" >/dev/null 2>&1 || "\$DOCKER_BIN" network create "\$CONTAINER_NETWORK" >/dev/null
+	docker_run_args+=(--network "\$CONTAINER_NETWORK")
+fi
+
+if [[ -n "\${CONTAINER_PORTS:-}" ]]; then
 	split_delimited_values "\$CONTAINER_PORTS"
 	for item in "\${SPLIT_VALUES[@]}"; do
 		docker_run_args+=(-p "\$item")
 	done
 fi
 
-if [[ -n "\$CONTAINER_VOLUMES" ]]; then
+if [[ -n "\${CONTAINER_VOLUMES:-}" ]]; then
 	split_delimited_values "\$CONTAINER_VOLUMES"
 	for item in "\${SPLIT_VALUES[@]}"; do
 		docker_run_args+=(-v "\$item")
 	done
 fi
 
-if [[ -n "\$CONTAINER_ENVS" ]]; then
+if [[ -n "\${CONTAINER_ENVS:-}" ]]; then
 	split_delimited_values "\$CONTAINER_ENVS"
 	for item in "\${SPLIT_VALUES[@]}"; do
 		docker_run_args+=(-e "\$item")
 	done
 fi
 
-if [[ -n "\$CONTAINER_NETWORK" ]]; then
-	docker_run_args+=(--network "\$CONTAINER_NETWORK")
-fi
-
-if [[ -n "\$CONTAINER_EXTRA_ARGS" ]]; then
-	split_delimited_values "\$CONTAINER_EXTRA_ARGS"
+if [[ -n "\${CONTAINER_EXTRA_ARGS:-}" ]]; then
+	split_delimited_values "\${CONTAINER_EXTRA_ARGS}"
 	for item in "\${SPLIT_VALUES[@]}"; do
 		docker_run_args+=("\$item")
 	done
@@ -293,87 +331,11 @@ fi
 
 docker_run_args+=("\$REMOTE_IMAGE_NAME_VALUE")
 
-check_remote_port_conflicts "\$REMOTE_CONTAINER_NAME_VALUE" "\$CONTAINER_PORTS" "\$DOCKER_BIN"
+cd \$REMOTE_DOCKER_CONTEXT_VALUE
+"\$DOCKER_BIN" build -t "\$REMOTE_IMAGE_NAME_VALUE" -f "\$REMOTE_DOCKERFILE_NAME_VALUE" .
+check_remote_port_conflicts "\$REMOTE_CONTAINER_NAME_VALUE" "\${CONTAINER_PORTS:-}" "\$DOCKER_BIN"
 "\$DOCKER_BIN" rm -f "\$REMOTE_CONTAINER_NAME_VALUE" >/dev/null 2>&1 || true
 "\$DOCKER_BIN" "\${docker_run_args[@]}"
-${REMOTE_POST_DEPLOY:-:}
-
-log '重启完成'
-EOF
-	chmod +x "$script_path"
-}
-
-[[ -f "$ENV_FILE" ]] || fail "未找到配置文件: $ENV_FILE"
-
-load_env_file "$ENV_FILE"
-
-require_command dotnet
-require_command rsync
-require_command ssh
-
-TUNNEL_PROJECT_PATH="${TUNNEL_PROJECT_PATH:-$ROOT_DIR/ProxyTransfer.TunnelHost/ProxyTransfer.TunnelHost.csproj}"
-TUNNEL_PROJECT_DIR="$(cd -- "$(dirname -- "$TUNNEL_PROJECT_PATH")" && pwd)"
-TUNNEL_DOCKERFILE_PATH="${TUNNEL_DOCKERFILE_PATH:-$TUNNEL_PROJECT_DIR/Dockerfile}"
-PUBLISH_CONFIGURATION="${PUBLISH_CONFIGURATION:-Release}"
-PUBLISH_DIR="${PUBLISH_DIR:-$ROOT_DIR/.artifacts/publish/tunnel}"
-REMOTE_PORT="${REMOTE_PORT:-22}"
-REMOTE_DOCKERFILE_NAME="${REMOTE_DOCKERFILE_NAME:-Dockerfile}"
-REMOTE_IMAGE_NAME="${TUNNEL_REMOTE_IMAGE_NAME:-proxytransfer-tunnel:latest}"
-REMOTE_CONTAINER_NAME="${TUNNEL_REMOTE_CONTAINER_NAME:-proxytransfer-tunnel}"
-REMOTE_PATH="${TUNNEL_REMOTE_PATH:-/apps/proxytransfer/tunnel}"
-REMOTE_RUNTIME_ENV_PATH="${TUNNEL_REMOTE_RUNTIME_ENV_PATH:-/apps/proxytransfer/config/tunnel.runtime.env}"
-CONTAINER_RESTART="${CONTAINER_RESTART:-unless-stopped}"
-DOCKER_BIN="${DOCKER_BIN:-docker}"
-RSYNC_DELETE="${RSYNC_DELETE:-true}"
-
-require_env REMOTE_HOST
-require_env REMOTE_USER
-require_env REMOTE_PATH
-
-REMOTE_DOCKER_CONTEXT="${REMOTE_DOCKER_CONTEXT:-$REMOTE_PATH}"
-REMOTE_RESTART_SCRIPT_NAME="restart_tunnel.sh"
-REMOTE_RESTART_SCRIPT_PATH="${REMOTE_PATH%/}/$REMOTE_RESTART_SCRIPT_NAME"
-
-[[ -f "$TUNNEL_DOCKERFILE_PATH" ]] || fail "未找到 Dockerfile: $TUNNEL_DOCKERFILE_PATH"
-
-remote_target="$REMOTE_USER@$REMOTE_HOST"
-ssh_args=(-p "$REMOTE_PORT")
-rsync_args=(-az)
-
-if [[ -n "${SSH_EXTRA_ARGS:-}" ]]; then
-	IFS='|' read -r -a ssh_extra_parts <<< "$SSH_EXTRA_ARGS"
-	ssh_args+=("${ssh_extra_parts[@]}")
-	rsync_args+=("-e" "ssh $(printf '%q ' "${ssh_args[@]}")")
-else
-	rsync_args+=("-e" "ssh -p $REMOTE_PORT")
-fi
-
-if [[ "$RSYNC_DELETE" == "true" ]]; then
-	rsync_args+=(--delete)
-fi
-
-log "发布 TunnelHost"
-rm -rf "$PUBLISH_DIR"
-dotnet publish "$TUNNEL_PROJECT_PATH" -c "$PUBLISH_CONFIGURATION" -o "$PUBLISH_DIR"
-cp "$TUNNEL_DOCKERFILE_PATH" "$PUBLISH_DIR/$REMOTE_DOCKERFILE_NAME"
-generate_restart_script "$PUBLISH_DIR/$REMOTE_RESTART_SCRIPT_NAME"
-
-log "同步发布目录到远端"
-ssh "${ssh_args[@]}" "$remote_target" "mkdir -p $(printf '%q' "$REMOTE_PATH")"
-rsync "${rsync_args[@]}" "$PUBLISH_DIR/" "$remote_target:$REMOTE_PATH/"
-remote_container_name_literal="$(printf '%q' "$REMOTE_CONTAINER_NAME")"
-remote_image_name_literal="$(printf '%q' "$REMOTE_IMAGE_NAME")"
-remote_dockerfile_name_literal="$(printf '%q' "$REMOTE_DOCKERFILE_NAME")"
-remote_docker_context_literal="$(printf '%q' "$REMOTE_DOCKER_CONTEXT")"
-remote_restart_script_path_literal="$(printf '%q' "$REMOTE_RESTART_SCRIPT_PATH")"
-
-log "远端构建镜像并启动容器"
-ssh "${ssh_args[@]}" "$remote_target" /bin/bash <<EOF
-set -Eeuo pipefail
-cd $remote_docker_context_literal
-docker build -t $remote_image_name_literal -f $remote_dockerfile_name_literal .
-chmod +x $remote_restart_script_path_literal
-$remote_restart_script_path_literal
 ${REMOTE_POST_DEPLOY:-:}
 EOF
 
