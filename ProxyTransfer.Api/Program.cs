@@ -300,6 +300,38 @@ app.MapPost(
 );
 
 app.MapPost(
+    "/api/upstream-pools/{poolId}/append",
+    (string poolId, UpdateUpstreamPoolRequest request, UpstreamPoolRegistry registry) =>
+    {
+        try
+        {
+            return Results.Ok(registry.Append(poolId, request));
+        }
+        catch (Exception ex)
+            when (ex is FormatException or InvalidOperationException or ArgumentException)
+        {
+            return Results.BadRequest(new { message = ex.Message });
+        }
+    }
+);
+
+app.MapPost(
+    "/api/upstream-pools/{poolId}/delete",
+    (string poolId, DeleteUpstreamPoolProxiesRequest request, UpstreamPoolRegistry registry) =>
+    {
+        try
+        {
+            return Results.Ok(registry.DeleteProxies(poolId, request));
+        }
+        catch (Exception ex)
+            when (ex is FormatException or InvalidOperationException or ArgumentException)
+        {
+            return Results.BadRequest(new { message = ex.Message });
+        }
+    }
+);
+
+app.MapPost(
     "/api/upstream-pools/{poolId}/test",
     async (
         string poolId,
@@ -331,8 +363,14 @@ app.MapPost(
             var items = new List<UpstreamProxyTestItemResponse>(candidates.Length);
             foreach (var upstream in candidates)
             {
+                var endpoint = registry.GetEndpoint(poolId, upstream.Id);
                 var result = await tester
-                    .TestUpstreamProxyAsync(upstream, cancellationToken)
+                    .TestUpstreamProxyAsync(
+                        upstream.Id,
+                        upstream.ProxyDisplay,
+                        endpoint,
+                        cancellationToken
+                    )
                     .ConfigureAwait(false);
 
                 if (result.Success)

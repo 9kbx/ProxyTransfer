@@ -62,6 +62,14 @@ public sealed record BatchSummaryResponse(string BatchId, int TotalCount, int Ru
 
 public sealed record ImportUpstreamPoolRequest(string ProxyText, string? PoolId, string? Note);
 
+public sealed record UpdateUpstreamPoolRequest(string ProxyText, string? Note);
+
+public sealed record DeleteUpstreamPoolProxiesRequest(
+    IReadOnlyList<Guid>? UpstreamIds = null,
+    string? ProxyText = null,
+    bool RemoveFailed = false
+);
+
 public sealed record UpstreamProxyResponse(
     Guid Id,
     string PoolId,
@@ -100,6 +108,13 @@ public sealed record ImportUpstreamPoolResponse(
     string PoolId,
     int ImportedCount,
     int TotalCount,
+    IReadOnlyList<UpstreamProxyResponse> Items
+);
+
+public sealed record DeleteUpstreamPoolProxiesResponse(
+    string PoolId,
+    int RemovedCount,
+    int RemainingCount,
     IReadOnlyList<UpstreamProxyResponse> Items
 );
 

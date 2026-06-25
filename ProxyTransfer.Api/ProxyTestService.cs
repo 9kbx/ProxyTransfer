@@ -326,7 +326,9 @@ public sealed class ProxyTestService
     }
 
     public async Task<UpstreamProxyTestItemResponse> TestUpstreamProxyAsync(
-        UpstreamProxyResponse upstream,
+        Guid upstreamId,
+        string proxyDisplay,
+        ProxyEndpoint proxy,
         CancellationToken cancellationToken
     )
     {
@@ -334,12 +336,11 @@ public sealed class ProxyTestService
 
         try
         {
-            var proxy = ProxyEndpoint.Parse(upstream.Proxy);
             var probe = await ProbeOnceAsync(proxy, cancellationToken).ConfigureAwait(false);
 
             return new UpstreamProxyTestItemResponse(
-                upstream.Id,
-                upstream.ProxyDisplay,
+                upstreamId,
+                proxyDisplay,
                 true,
                 probe.ExitIp,
                 probe.ElapsedMilliseconds,
@@ -350,8 +351,8 @@ public sealed class ProxyTestService
         catch (Exception ex)
         {
             return new UpstreamProxyTestItemResponse(
-                upstream.Id,
-                upstream.ProxyDisplay,
+                upstreamId,
+                proxyDisplay,
                 false,
                 null,
                 null,

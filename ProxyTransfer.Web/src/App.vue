@@ -230,6 +230,14 @@ const upstreamPoolForm = reactive({
   note: '',
 })
 
+const appendUpstreamPoolForm = reactive({
+  proxyText: '',
+})
+
+const deleteUpstreamPoolForm = reactive({
+  proxyText: '',
+})
+
 const fixedProxyForm = reactive({
   poolId: '',
   downstreamProtocol: 'http',
@@ -252,6 +260,7 @@ const batches = ref<BatchSummary[]>([])
 const upstreamPools = ref<UpstreamPoolRecord[]>([])
 const selectedPoolId = ref('')
 const selectedPool = ref<UpstreamPoolDetails | null>(null)
+const selectedUpstreamIds = ref<string[]>([])
 const fixedProxies = ref<FixedProxyRecord[]>([])
 const busy = ref(false)
 const statusMessage = ref('')
@@ -302,6 +311,20 @@ const selectedUpstreamPoolSuccessItems = computed(() =>
 const selectedUpstreamPoolFailureItems = computed(() =>
   (selectedUpstreamPoolTestRun.value?.items ?? []).filter((item) => !item.success),
 )
+const selectedFailedPoolItems = computed(() =>
+  selectedPoolItems.value.filter(
+    (item) => item.status === 'Unhealthy' || item.failureCount > 0 || !!item.lastError,
+  ),
+)
+const selectedImportedDeleteTargets = computed(() => parseProxyTargets(deleteUpstreamPoolForm.proxyText))
+const selectedImportedDeleteMatchCount = computed(() => {
+  if (!selectedImportedDeleteTargets.value.length) {
+    return 0
+  }
+
+  const targetSet = new Set(selectedImportedDeleteTargets.value)
+  return selectedPoolItems.value.filter((item) => targetSet.has(item.proxy)).length
+})
 const selectedUpstreamPoolRetestLookup = computed<Record<string, 'recovered' | 'still-failed'>>(() => {
   const comparison = upstreamPoolRetestComparison.value
   if (!comparison || comparison.currentRunId !== selectedUpstreamPoolTestRun.value?.runId) {
@@ -379,6 +402,54 @@ function formatSelectionPolicy(policy: string | null | undefined): string {
   return selectionPolicyOptions.find((item) => item.value === policy)?.label ?? (policy || '未知')
 }
 
+function parseProxyTargets(proxyText: string): string[] {
+  const values = new Set<string>()
+
+  for (const rawLine of proxyText.split(/\r?\n/)) {
+    const normalized = normalizeProxyTarget(rawLine)
+    if (normalized) {
+      values.add(normalized)
+    }
+  }
+
+  return [...values]
+}
+
+function normalizeProxyTarget(rawValue: string): string | null {
+  const trimmed = rawValue.trim()
+  if (!trimmed || trimmed.startsWith('#')) {
+    return null
+  }
+
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`
+
+  try {
+    const url = new URL(candidate)
+    if (!url.hostname || !url.port) {
+      return null
+    }
+
+    return `${url.protocol}//${url.hostname}:${url.port}`
+  } catch {
+    return null
+  }
+}
+
+function confirmDeleteFromSelectedPool(targetLabel: string, count: number, detail?: string): boolean {
+  if (!selectedPoolId.value) {
+    errorMessage.value = '请先选择一个上游池。'
+    return false
+  }
+
+  const summary = [`即将从上游池 ${selectedPoolId.value} 删除 ${count} 条${targetLabel}。`]
+  if (detail) {
+    summary.push(detail)
+  }
+
+  summary.push('删除后会立即影响后续新连接，是否继续？')
+  return window.confirm(summary.join('\n'))
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     headers: {
@@ -434,8 +505,12 @@ async function loadFixedData() {
 
   if (selectedPoolId.value) {
     selectedPool.value = await apiFetch<UpstreamPoolDetails>(`/api/upstream-pools/${selectedPoolId.value}`)
+    selectedUpstreamIds.value = selectedUpstreamIds.value.filter((id) =>
+      selectedPool.value?.items.some((item) => item.id === id),
+    )
   } else {
     selectedPool.value = null
+    selectedUpstreamIds.value = []
   }
 
   if (!fixedProxyForm.poolId && poolData.length > 0) {
@@ -621,6 +696,7 @@ async function importUpstreamPool() {
 
 async function selectPool(poolId: string) {
   selectedPoolId.value = poolId
+  selectedUpstreamIds.value = []
   await withBusy(async () => {
     selectedPool.value = await apiFetch<UpstreamPoolDetails>(`/api/upstream-pools/${poolId}`)
     await loadUpstreamPoolTestHistory(poolId)
@@ -630,10 +706,143 @@ async function selectPool(poolId: string) {
 async function reloadSelectedPool() {
   if (!selectedPoolId.value) {
     selectedPool.value = null
+    selectedUpstreamIds.value = []
     return
   }
 
   selectedPool.value = await apiFetch<UpstreamPoolDetails>(`/api/upstream-pools/${selectedPoolId.value}`)
+  selectedUpstreamIds.value = selectedUpstreamIds.value.filter((id) =>
+    selectedPool.value?.items.some((item) => item.id === id),
+  )
+}
+
+async function appendToSelectedPool() {
+  if (!selectedPoolId.value) {
+    errorMessage.value = '请先选择一个上游池。'
+    return
+  }
+
+  if (!appendUpstreamPoolForm.proxyText.trim()) {
+    errorMessage.value = '请先粘贴要追加的上游代理。'
+    return
+  }
+
+  await withBusy(async () => {
+    const response = await apiFetch<ImportUpstreamPoolResponse>(`/api/upstream-pools/${selectedPoolId.value}/append`, {
+      method: 'POST',
+      body: JSON.stringify({
+        proxyText: appendUpstreamPoolForm.proxyText,
+        note: null,
+      }),
+    })
+
+    appendUpstreamPoolForm.proxyText = ''
+    await loadFixedData()
+    statusMessage.value = `上游池 ${response.poolId} 已追加 ${response.importedCount} 条代理，当前共 ${response.totalCount} 条。`
+  })
+}
+
+async function deleteFailedUpstreams() {
+  if (!selectedPoolId.value) {
+    errorMessage.value = '请先选择一个上游池。'
+    return
+  }
+
+  if (!selectedFailedPoolItems.value.length) {
+    errorMessage.value = '当前池里没有可删除的失败代理。'
+    return
+  }
+
+  if (!confirmDeleteFromSelectedPool('失败代理', selectedFailedPoolItems.value.length)) {
+    return
+  }
+
+  await withBusy(async () => {
+    const response = await apiFetch<{ poolId: string; removedCount: number; remainingCount: number }>(`/api/upstream-pools/${selectedPoolId.value}/delete`, {
+      method: 'POST',
+      body: JSON.stringify({ removeFailed: true }),
+    })
+
+    selectedUpstreamIds.value = []
+    upstreamPoolRetestComparison.value = null
+    await loadFixedData()
+    statusMessage.value = `已从上游池 ${response.poolId} 删除 ${response.removedCount} 条失败代理，剩余 ${response.remainingCount} 条。`
+  })
+}
+
+async function deleteSelectedUpstreams() {
+  if (!selectedPoolId.value) {
+    errorMessage.value = '请先选择一个上游池。'
+    return
+  }
+
+  if (!selectedUpstreamIds.value.length) {
+    errorMessage.value = '请先勾选要删除的上游代理。'
+    return
+  }
+
+  if (!confirmDeleteFromSelectedPool('勾选代理', selectedUpstreamIds.value.length)) {
+    return
+  }
+
+  await withBusy(async () => {
+    const response = await apiFetch<{ poolId: string; removedCount: number; remainingCount: number }>(`/api/upstream-pools/${selectedPoolId.value}/delete`, {
+      method: 'POST',
+      body: JSON.stringify({ upstreamIds: selectedUpstreamIds.value }),
+    })
+
+    selectedUpstreamIds.value = []
+    upstreamPoolRetestComparison.value = null
+    await loadFixedData()
+    statusMessage.value = `已从上游池 ${response.poolId} 删除 ${response.removedCount} 条勾选代理，剩余 ${response.remainingCount} 条。`
+  })
+}
+
+async function deleteImportedUpstreams() {
+  if (!selectedPoolId.value) {
+    errorMessage.value = '请先选择一个上游池。'
+    return
+  }
+
+  if (!deleteUpstreamPoolForm.proxyText.trim()) {
+    errorMessage.value = '请先粘贴要删除的代理列表。'
+    return
+  }
+
+  if (!selectedImportedDeleteMatchCount.value) {
+    errorMessage.value = selectedImportedDeleteTargets.value.length
+      ? '当前导入列表与池内代理没有匹配项。'
+      : '当前导入列表里没有可识别的代理。'
+    return
+  }
+
+  if (
+    !confirmDeleteFromSelectedPool(
+      '导入列表匹配代理',
+      selectedImportedDeleteMatchCount.value,
+      `本次输入 ${selectedImportedDeleteTargets.value.length} 条，匹配到 ${selectedImportedDeleteMatchCount.value} 条。`,
+    )
+  ) {
+    return
+  }
+
+  await withBusy(async () => {
+    const response = await apiFetch<{ poolId: string; removedCount: number; remainingCount: number }>(`/api/upstream-pools/${selectedPoolId.value}/delete`, {
+      method: 'POST',
+      body: JSON.stringify({ proxyText: deleteUpstreamPoolForm.proxyText }),
+    })
+
+    deleteUpstreamPoolForm.proxyText = ''
+    selectedUpstreamIds.value = []
+    upstreamPoolRetestComparison.value = null
+    await loadFixedData()
+    statusMessage.value = `已从上游池 ${response.poolId} 删除 ${response.removedCount} 条导入代理，剩余 ${response.remainingCount} 条。`
+  })
+}
+
+function toggleAllSelectedUpstreams(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked
+  selectedUpstreamIds.value = checked ? selectedPoolItems.value.map((item) => item.id) : []
 }
 
 async function addFixedProxy() {
@@ -1397,6 +1606,38 @@ onMounted(async () => {
           </div>
         </div>
 
+        <div v-if="selectedPoolId" class="pool-manage-grid">
+          <article class="pool-manage-card">
+            <h3>追加一批代理</h3>
+            <p>直接向当前上游池追加新代理；后续新连接会自动参与选择。</p>
+            <textarea
+              v-model="appendUpstreamPoolForm.proxyText"
+              rows="5"
+              placeholder="http://user:pass@2.2.2.2:1234"
+            />
+            <button class="primary" :disabled="busy" @click="appendToSelectedPool">追加到当前池</button>
+          </article>
+
+          <article class="pool-manage-card">
+            <h3>删除代理</h3>
+            <p>支持删除当前失败代理、表格勾选代理，或粘贴一批代理文本进行删除。</p>
+            <div class="action-stack">
+              <button class="ghost danger" :disabled="busy || !selectedFailedPoolItems.length" @click="deleteFailedUpstreams">删除失败代理</button>
+              <button class="ghost danger" :disabled="busy || !selectedUpstreamIds.length" @click="deleteSelectedUpstreams">删除勾选代理</button>
+            </div>
+            <p class="field-help warning">
+              当前预计删除：失败代理 {{ selectedFailedPoolItems.length }} 条，勾选代理 {{ selectedUpstreamIds.length }} 条，导入列表匹配 {{ selectedImportedDeleteMatchCount }} / {{ selectedImportedDeleteTargets.length }} 条。
+            </p>
+            <textarea
+              v-model="deleteUpstreamPoolForm.proxyText"
+              rows="5"
+              placeholder="粘贴要删除的代理，每行一条"
+            />
+            <button class="ghost danger" :disabled="busy" @click="deleteImportedUpstreams">按导入列表删除</button>
+            <p class="field-help warning">池内容更新后会立即影响后续新连接；固定入口地址不变，但候选上游会即时变化。</p>
+          </article>
+        </div>
+
         <div v-if="upstreamPoolTestHistory.length" class="history-strip">
           <button
             v-for="item in upstreamPoolTestHistory"
@@ -1446,6 +1687,15 @@ onMounted(async () => {
           <table>
             <thead>
               <tr>
+                <th>
+                  <input
+                    type="checkbox"
+                    class="row-check"
+                    :checked="selectedPoolItems.length > 0 && selectedUpstreamIds.length === selectedPoolItems.length"
+                    :disabled="!selectedPoolItems.length"
+                    @change="toggleAllSelectedUpstreams"
+                  />
+                </th>
                 <th>状态</th>
                 <th>上游代理</th>
                 <th>失败信息</th>
@@ -1456,6 +1706,9 @@ onMounted(async () => {
             </thead>
             <tbody>
               <tr v-for="item in selectedPoolItems" :key="item.id">
+                <td>
+                  <input v-model="selectedUpstreamIds" type="checkbox" class="row-check" :value="item.id" />
+                </td>
                 <td>
                   <span class="badge" :class="item.status.toLowerCase()">{{ item.status }}</span>
                 </td>

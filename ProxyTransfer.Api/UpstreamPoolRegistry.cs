@@ -100,6 +100,51 @@ public sealed class UpstreamPoolRegistry
         );
     }
 
+    public ImportUpstreamPoolResponse Append(string poolId, UpdateUpstreamPoolRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(poolId))
+        {
+            throw new ArgumentException("上游池 ID 不能为空。", nameof(poolId));
+        }
+
+        return Import(
+            new ImportUpstreamPoolRequest(request.ProxyText, poolId.Trim(), request.Note)
+        );
+    }
+
+    public DeleteUpstreamPoolProxiesResponse DeleteProxies(
+        string poolId,
+        DeleteUpstreamPoolProxiesRequest request
+    )
+    {
+        var pool = GetPoolEntry(poolId);
+        var targetUris = ParseProxyUris(request.ProxyText);
+        var targetIds = request.UpstreamIds?.Where(static id => id != Guid.Empty).ToHashSet() ?? [];
+
+        if (!request.RemoveFailed && targetIds.Count == 0 && targetUris.Count == 0)
+        {
+            throw new InvalidOperationException("请至少选择一种删除方式。");
+        }
+
+        var removedCount = 0;
+
+        lock (pool.SyncRoot)
+        {
+            removedCount = pool.Items.RemoveAll(item =>
+                ShouldRemove(item, request.RemoveFailed, targetIds, targetUris)
+            );
+            NormalizeNextIndex(pool);
+            pool.Touch();
+        }
+
+        return new DeleteUpstreamPoolProxiesResponse(
+            pool.PoolId,
+            removedCount,
+            pool.Items.Count,
+            pool.Items.Select(item => item.ToResponse(pool.PoolId)).ToArray()
+        );
+    }
+
     public UpstreamLease Acquire(string poolId)
     {
         var pool = GetPoolEntry(poolId);
@@ -163,7 +208,12 @@ public sealed class UpstreamPoolRegistry
 
     public void MarkSuccess(string poolId, Guid upstreamId)
     {
-        var item = GetPoolItem(poolId, upstreamId);
+        var item = TryGetPoolItem(poolId, upstreamId);
+        if (item is null)
+        {
+            return;
+        }
+
         lock (item.SyncRoot)
         {
             item.Status = UpstreamProxyStatus.Healthy;
@@ -179,7 +229,12 @@ public sealed class UpstreamPoolRegistry
 
     public void MarkFailure(string poolId, Guid upstreamId, Exception exception)
     {
-        var item = GetPoolItem(poolId, upstreamId);
+        var item = TryGetPoolItem(poolId, upstreamId);
+        if (item is null)
+        {
+            return;
+        }
+
         lock (item.SyncRoot)
         {
             item.Status = UpstreamProxyStatus.Unhealthy;
@@ -197,11 +252,22 @@ public sealed class UpstreamPoolRegistry
 
     public bool IsLeaseHealthy(string poolId, Guid upstreamId)
     {
-        var item = GetPoolItem(poolId, upstreamId);
+        var item = TryGetPoolItem(poolId, upstreamId);
+        if (item is null)
+        {
+            return false;
+        }
+
         lock (item.SyncRoot)
         {
             return item.DisabledUntil is null || item.DisabledUntil <= DateTimeOffset.UtcNow;
         }
+    }
+
+    public ProxyEndpoint GetEndpoint(string poolId, Guid upstreamId)
+    {
+        var item = GetPoolItem(poolId, upstreamId);
+        return item.Endpoint;
     }
 
     public string? GetSafeDisplay(Guid upstreamId)
@@ -227,6 +293,67 @@ public sealed class UpstreamPoolRegistry
         return pool
             .Items.Where(item => item.DisabledUntil is null || item.DisabledUntil <= now)
             .ToArray();
+    }
+
+    private static void NormalizeNextIndex(UpstreamPoolEntry pool)
+    {
+        if (pool.Items.Count == 0)
+        {
+            pool.NextIndex = -1;
+            return;
+        }
+
+        if (pool.NextIndex >= pool.Items.Count)
+        {
+            pool.NextIndex %= pool.Items.Count;
+        }
+    }
+
+    private static HashSet<string> ParseProxyUris(string? proxyText)
+    {
+        if (string.IsNullOrWhiteSpace(proxyText))
+        {
+            return [];
+        }
+
+        return proxyText
+            .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(static line => line.Trim())
+            .Where(static line => !string.IsNullOrWhiteSpace(line) && !line.StartsWith('#'))
+            .Select(ProxyEndpoint.Parse)
+            .Select(static endpoint => endpoint.ProxyUri)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldRemove(
+        UpstreamProxyEntry item,
+        bool removeFailed,
+        HashSet<Guid> targetIds,
+        HashSet<string> targetUris
+    )
+    {
+        if (targetIds.Contains(item.Id))
+        {
+            return true;
+        }
+
+        if (targetUris.Contains(item.Endpoint.ProxyUri))
+        {
+            return true;
+        }
+
+        if (!removeFailed)
+        {
+            return false;
+        }
+
+        lock (item.SyncRoot)
+        {
+            return item.Status == UpstreamProxyStatus.Unhealthy
+                || item.DisabledUntil is not null
+                || !string.IsNullOrWhiteSpace(item.LastError)
+                || item.FailureCount > 0;
+        }
     }
 
     public IReadOnlyList<(string PoolId, Guid UpstreamId, ProxyEndpoint Endpoint)> GetProbeTargets()
@@ -265,6 +392,24 @@ public sealed class UpstreamPoolRegistry
         {
             return pool.Items.FirstOrDefault(item => item.Id == upstreamId)
                 ?? throw new InvalidOperationException($"未找到上游代理: {upstreamId}");
+        }
+    }
+
+    private UpstreamProxyEntry? TryGetPoolItem(string poolId, Guid upstreamId)
+    {
+        if (string.IsNullOrWhiteSpace(poolId))
+        {
+            return null;
+        }
+
+        if (!_pools.TryGetValue(poolId.Trim(), out var pool))
+        {
+            return null;
+        }
+
+        lock (pool.SyncRoot)
+        {
+            return pool.Items.FirstOrDefault(item => item.Id == upstreamId);
         }
     }
 
