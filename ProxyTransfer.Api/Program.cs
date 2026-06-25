@@ -48,8 +48,8 @@ builder.WebHost.UseUrls(hostOptions.ApiUrl);
 var app = builder.Build();
 
 app.UseCors("frontend");
-
-app.MapGet("/", () => Results.Redirect("/api/tunnels"));
+app.UseDefaultFiles();
+app.UseStaticFiles();
 
 app.MapGet("/api/tunnels", (ProxyTunnelRegistry registry) => Results.Ok(registry.List()));
 
@@ -530,5 +530,16 @@ app.MapGet(
     (string? mode, Guid? resourceId, ProxyTestService tester) =>
         Results.Ok(tester.GetHistory(mode, resourceId))
 );
+
+app.MapFallback(async context =>
+{
+    if (context.Request.Path.StartsWithSegments("/api"))
+    {
+        context.Response.StatusCode = StatusCodes.Status404NotFound;
+        return;
+    }
+
+    await context.Response.SendFileAsync(Path.Combine(app.Environment.WebRootPath, "index.html"));
+});
 
 app.Run();

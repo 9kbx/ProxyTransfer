@@ -58,6 +58,8 @@ dotnet run
 "TunnelHost": {
   "ListenAddress": "0.0.0.0",
   "PublicHost": "127.0.0.1",
+  "ListenPortRangeStart": 40000,
+  "ListenPortRangeEnd": 40800,
   "ApiUrl": "http://0.0.0.0:5080",
   "DefaultStickyMinutes": 10,
   "FailureCooldownSeconds": 90,
@@ -70,6 +72,7 @@ dotnet run
 
 新增字段说明：
 
+- `ListenPortRangeStart` / `ListenPortRangeEnd`：限制 API 可分配给下游转发代理的监听端口范围；如果配置了范围，自动分配和手动指定端口都会被约束在这个区间内
 - `DefaultStickyMinutes`：固定下游代理入口默认粘性时长，单位分钟
 - `FailureCooldownSeconds`：某个上游连接失败后，被临时摘除的冷却时长，单位秒
 - `ProbeIntervalSeconds`：后台主动探活周期，单位秒
@@ -190,6 +193,45 @@ npm run build
 - [ProxyTransfer.Web/dist](ProxyTransfer.Web/dist)
 
 这个目录可以交给 Nginx、Caddy 或其它静态文件服务部署。
+
+### 5. 发布到远程服务器
+
+仓库内提供了 [scripts/publish_to_remote.sh](scripts/publish_to_remote.sh) 脚本，用于一次性完成这些步骤：
+
+- 构建 [ProxyTransfer.Web](ProxyTransfer.Web) 前端
+- 发布 [ProxyTransfer.Api](ProxyTransfer.Api) 后端
+- 将前端构建产物复制到 API 发布目录的 `wwwroot`
+- 将完整发布目录通过 `rsync` 同步到远端
+- 在远端基于发布目录执行 `docker build`
+- 停掉旧容器并重新 `docker run`
+
+使用方式：
+
+1. 复制 [scripts/.env.example](scripts/.env.example) 为 `scripts/.env`
+2. 按你的服务器信息修改 `REMOTE_HOST`、`REMOTE_USER`、`REMOTE_PATH`
+3. 在远端服务器上创建运行时配置文件，路径与 `REMOTE_RUNTIME_ENV_PATH` 对应；可以参考 [scripts/remote.runtime.env.example](scripts/remote.runtime.env.example)
+4. 在仓库根目录执行：
+
+```bash
+./scripts/publish_to_remote.sh
+```
+
+如果需要指定其它配置文件路径，也可以执行：
+
+```bash
+./scripts/publish_to_remote.sh /path/to/your.env
+```
+
+容器配置说明：
+
+- 本地 [scripts/.env.example](scripts/.env.example) 只保留发布目标、镜像名、容器名等部署标识
+- 远端 [scripts/remote.runtime.env.example](scripts/remote.runtime.env.example) 对应的是服务器运行时参数，例如端口映射、目录挂载、容器环境变量
+- `CONTAINER_PORTS`：多个 `-p` 映射，使用 `|` 分隔
+- `CONTAINER_VOLUMES`：多个 `-v` 映射，使用 `|` 分隔
+- `CONTAINER_ENVS`：多个 `-e` 环境变量，使用 `|` 分隔
+- `CONTAINER_EXTRA_ARGS`：追加原始 `docker run` 参数，使用 `|` 分隔
+
+[ProxyTransfer.Api/Dockerfile](ProxyTransfer.Api/Dockerfile) 是运行时镜像 Dockerfile，脚本会自动把它复制到 API 发布目录后再上传，因此远端只需要收到发布产物，不需要源码仓库。
 
 ## 使用方式
 
@@ -468,7 +510,7 @@ user3:pass3@1.2.3.6:1080
 
 - `poolId`：固定入口绑定到哪个上游池
 - `downstreamProtocol`：对外暴露为 `http` 或 `socks5`
-- `listenPort`：可选；不填则随机端口
+- `listenPort`：可选；不填则随机端口；如果配置了 `TunnelHost.ListenPortRangeStart/End`，随机端口会从该范围内选择
 - `selectionPolicy`：上游选择策略，支持 `sticky`、`round-robin`、`least-failures`
 - `stickyMinutes`：固定入口优先复用最近成功上游的时长，单位分钟；仅 `sticky` 策略使用
 - `autoStart`：是否创建后立即启动
@@ -649,6 +691,17 @@ Console.WriteLine(tunnel.LocalProxyUri);
 默认值：
 
 - `http://0.0.0.0:5080`
+
+##### `TunnelHost.ListenPortRangeStart` / `TunnelHost.ListenPortRangeEnd`
+
+作用：限制 API 启动下游 HTTP/SOCKS5 转发代理时允许使用的监听端口范围。
+
+行为：
+
+- 两个值必须同时配置
+- 如果请求里显式指定 `listenPort`，该端口必须落在范围内
+- 如果请求里不指定 `listenPort`，API 会在范围内选择一个当前可用端口再传给隧道层
+- 固定入口代理和普通代理都会应用这个范围限制
 
 ##### `Cors.AllowedOrigins`
 

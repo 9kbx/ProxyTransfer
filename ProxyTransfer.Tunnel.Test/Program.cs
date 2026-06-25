@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Security;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -43,24 +44,74 @@ static async Task RunSingleProxyTestAsync(
     CancellationToken cancellationToken = default
 )
 {
-    var proxy = ResolveSingleProxy(options.ProxySource);
+    if (!string.IsNullOrWhiteSpace(options.ProxySource) && LooksLikeProxyUri(options.ProxySource))
+    {
+        var proxy = ParseProxy(options.ProxySource.Trim(), 1);
 
-    logger.LogInformation("[模式] 单代理一对一测试");
-    logger.LogInformation("[配置] 目标代理: {ProxyUri}", proxy.SafeDisplayUri);
+        logger.LogInformation("[模式] 单代理一对一测试");
+        logger.LogInformation("[配置] 目标代理: {ProxyUri}", proxy.SafeDisplayUri);
 
-    var result = await tester.RunOnceAsync(proxy, cancellationToken).ConfigureAwait(false);
+        var result = await tester.RunOnceAsync(proxy, cancellationToken).ConfigureAwait(false);
+
+        logger.LogInformation(
+            "[完成] 单代理测试完成，代理: {ProxyUri}，出口 IP: {Ip}，耗时: {ElapsedMs} ms",
+            proxy.SafeDisplayUri,
+            result.ExitIp,
+            result.ElapsedMilliseconds
+        );
+
+        Environment.ExitCode = 0;
+        return;
+    }
+
+    var proxyFilePath = ResolveProxyFilePath(options.ProxySource);
+    var proxies = LoadProxies(proxyFilePath);
+    var failures = 0;
+
+    logger.LogInformation("[模式] proxy.txt 批量测试");
+    logger.LogInformation("[配置] 代理文件: {ProxyFilePath}", proxyFilePath);
+    logger.LogInformation("[配置] 代理数量: {ProxyCount}", proxies.Count);
+
+    for (var index = 0; index < proxies.Count; index++)
+    {
+        var proxy = proxies[index];
+
+        try
+        {
+            var result = await tester.RunOnceAsync(proxy, cancellationToken).ConfigureAwait(false);
+            logger.LogInformation(
+                "[完成] ({Index}/{Total}) 代理: {ProxyUri}，出口 IP: {Ip}，耗时: {ElapsedMs} ms",
+                index + 1,
+                proxies.Count,
+                proxy.SafeDisplayUri,
+                result.ExitIp,
+                result.ElapsedMilliseconds
+            );
+        }
+        catch (Exception ex)
+        {
+            failures++;
+            logger.LogError(
+                ex,
+                "[失败] ({Index}/{Total}) 代理测试失败: {ProxyUri}",
+                index + 1,
+                proxies.Count,
+                proxy.SafeDisplayUri
+            );
+        }
+    }
 
     logger.LogInformation(
-        "[完成] 单代理测试完成，代理: {ProxyUri}，出口 IP: {Ip}，耗时: {ElapsedMs} ms",
-        proxy.SafeDisplayUri,
-        result.ExitIp,
-        result.ElapsedMilliseconds
+        "[完成] proxy.txt 批量测试结束，总数: {TotalCount}，成功: {SuccessCount}，失败: {FailureCount}",
+        proxies.Count,
+        proxies.Count - failures,
+        failures
     );
 
-    Environment.ExitCode = 0;
+    Environment.ExitCode = failures == 0 ? 0 : 1;
 }
 
-static async Task RunFixedProxyTestAsync(
+async Task RunFixedProxyTestAsync(
     TestOptions options,
     ForwardedProxySmokeTester tester,
     FixedProxyApiClient apiClient,
@@ -212,7 +263,7 @@ static async Task RunFixedProxyTestAsync(
     Environment.ExitCode = failures == 0 ? 0 : 1;
 }
 
-static async Task<FixedProxySnapshot?> TryResolveSnapshotSafelyAsync(
+async Task<FixedProxySnapshot?> TryResolveSnapshotSafelyAsync(
     TestOptions options,
     ProxyEndpoint proxy,
     FixedProxyApiClient apiClient,
@@ -288,7 +339,7 @@ static string ResolveProxyFilePath(string? source)
     }
 
     throw new FileNotFoundException(
-        "未找到 proxy.txt，请将要测试的单个下游代理写入第一行，或在命令行上传入文件路径/直接传入代理地址。",
+        "未找到 proxy.txt，请把要测试的下游代理写入文件，或在命令行上传入文件路径/直接传入代理地址。",
         "proxy.txt"
     );
 }
@@ -318,8 +369,8 @@ static List<ProxyEndpoint> LoadProxies(string proxyFilePath)
 static bool LooksLikeProxyUri(string value)
 {
     return value.Contains("://", StringComparison.Ordinal)
-        || value.StartsWith("127.", StringComparison.Ordinal)
-        || value.StartsWith("localhost", StringComparison.OrdinalIgnoreCase);
+           || value.StartsWith("127.", StringComparison.Ordinal)
+           || value.StartsWith("localhost", StringComparison.OrdinalIgnoreCase);
 }
 
 static ProxyEndpoint ParseProxy(string line, int lineNumber)
@@ -393,7 +444,8 @@ internal sealed class ForwardedProxySmokeTester
             webProxy.Credentials = new NetworkCredential(proxy.UserName, proxy.Password);
         }
 
-        return new HttpClientHandler { Proxy = webProxy, UseProxy = true };
+        return new HttpClientHandler
+            { Proxy = webProxy, UseProxy = true, ServerCertificateCustomValidationCallback = (_, _, _, _) => true };
     }
 
     private static HttpMessageHandler CreateSocksHandler(ProxyEndpoint proxy)
@@ -409,6 +461,10 @@ internal sealed class ForwardedProxySmokeTester
             Proxy = socksWebProxy,
             UseProxy = true,
             ConnectTimeout = TimeSpan.FromSeconds(10),
+            SslOptions = new SslClientAuthenticationOptions()
+            {
+                RemoteCertificateValidationCallback = (_, _, _, _) => true
+            }
         };
     }
 }

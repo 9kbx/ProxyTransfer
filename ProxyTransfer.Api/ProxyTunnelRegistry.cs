@@ -11,10 +11,12 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
 
     private readonly ConcurrentDictionary<Guid, TunnelEntry> _entries = new();
     private readonly ProxyTunnelHostOptions _defaults;
+    private readonly ListenPortAllocator _listenPortAllocator;
 
     public ProxyTunnelRegistry(ProxyTunnelHostOptions defaults)
     {
         _defaults = defaults;
+        _listenPortAllocator = new ListenPortAllocator(defaults);
     }
 
     public IReadOnlyList<ProxyTunnelResponse> List()
@@ -75,9 +77,12 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
         var imported = new List<ProxyTunnelResponse>(lines.Length);
         for (var index = 0; index < lines.Length; index++)
         {
-            int? listenPort = request.FirstListenPort.HasValue
-                ? request.FirstListenPort.Value + index
-                : null;
+            int? listenPort = request.FirstListenPort switch
+            {
+                -1 => -1,
+                int firstListenPort => firstListenPort + index,
+                null => null,
+            };
             var created = await AddAsync(
                     new AddProxyRequest(
                         lines[index],
@@ -211,7 +216,13 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
             try
             {
                 var listenAddress = IPAddress.Parse(entry.ListenAddress);
-                entry.Tunnel = await CreateTunnelAsync(entry, listenAddress, cancellationToken)
+                var listenPort = ResolveListenPort(entry);
+                entry.Tunnel = await CreateTunnelAsync(
+                        entry,
+                        listenAddress,
+                        listenPort,
+                        cancellationToken
+                    )
                     .ConfigureAwait(false);
 
                 entry.ActiveListenPort = entry.Tunnel.LocalPort;
@@ -312,6 +323,7 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
     private static Task<IProxyTunnel> CreateTunnelAsync(
         TunnelEntry entry,
         IPAddress listenAddress,
+        int listenPort,
         CancellationToken cancellationToken
     )
     {
@@ -320,11 +332,13 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
             HttpDownstreamProtocol => CreateHttpTunnelAsync(
                 entry,
                 listenAddress,
+                listenPort,
                 cancellationToken
             ),
             Socks5DownstreamProtocol => CreateSocks5TunnelAsync(
                 entry,
                 listenAddress,
+                listenPort,
                 cancellationToken
             ),
             _ => throw new InvalidOperationException(
@@ -336,6 +350,7 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
     private static async Task<IProxyTunnel> CreateHttpTunnelAsync(
         TunnelEntry entry,
         IPAddress listenAddress,
+        int listenPort,
         CancellationToken cancellationToken
     )
     {
@@ -343,7 +358,7 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
             .StartAsync(
                 entry.RemoteProxy,
                 listenAddress,
-                entry.RequestedListenPort,
+                listenPort,
                 entry.PublicHost,
                 cancellationToken
             )
@@ -353,6 +368,7 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
     private static async Task<IProxyTunnel> CreateSocks5TunnelAsync(
         TunnelEntry entry,
         IPAddress listenAddress,
+        int listenPort,
         CancellationToken cancellationToken
     )
     {
@@ -360,11 +376,25 @@ public sealed class ProxyTunnelRegistry : IAsyncDisposable
             .StartAsync(
                 entry.RemoteProxy,
                 listenAddress,
-                entry.RequestedListenPort,
+                listenPort,
                 entry.PublicHost,
                 cancellationToken
             )
             .ConfigureAwait(false);
+    }
+
+    private int ResolveListenPort(TunnelEntry entry)
+    {
+        var occupiedPorts = _entries
+            .Values.Where(candidate => candidate.Id != entry.Id && candidate.ActiveListenPort > 0)
+            .Select(candidate => candidate.ActiveListenPort)
+            .ToArray();
+
+        return _listenPortAllocator.ResolvePort(
+            entry.ListenAddress,
+            entry.RequestedListenPort,
+            occupiedPorts
+        );
     }
 
     private enum TunnelStatus

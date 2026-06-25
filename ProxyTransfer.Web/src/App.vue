@@ -202,6 +202,10 @@ const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.re
 
 const activeView = ref<ViewMode>('classic')
 
+function resolvePortPayload(portText: string): number {
+  return portText.trim() ? Number(portText) : -1
+}
+
 const importForm = reactive({
   proxyText: '',
   downstreamProtocol: 'http',
@@ -579,7 +583,7 @@ async function importBatch() {
         note: importForm.note || null,
         listenAddress: importForm.listenAddress || null,
         publicHost: importForm.publicHost || null,
-        firstListenPort: importForm.firstListenPort ? Number(importForm.firstListenPort) : null,
+        firstListenPort: resolvePortPayload(importForm.firstListenPort),
         autoStart: importForm.autoStart,
       }),
     })
@@ -606,7 +610,7 @@ async function addManualProxy() {
         note: manualForm.note || null,
         listenAddress: manualForm.listenAddress || null,
         publicHost: manualForm.publicHost || null,
-        listenPort: manualForm.listenPort ? Number(manualForm.listenPort) : null,
+        listenPort: resolvePortPayload(manualForm.listenPort),
         autoStart: manualForm.autoStart,
       }),
     })
@@ -861,7 +865,7 @@ async function addFixedProxy() {
         note: fixedProxyForm.note || null,
         listenAddress: fixedProxyForm.listenAddress || null,
         publicHost: fixedProxyForm.publicHost || null,
-        listenPort: fixedProxyForm.listenPort ? Number(fixedProxyForm.listenPort) : null,
+        listenPort: resolvePortPayload(fixedProxyForm.listenPort),
         stickyMinutes: fixedProxyForm.stickyMinutes ? Number(fixedProxyForm.stickyMinutes) : null,
         autoStart: fixedProxyForm.autoStart,
       }),
@@ -1269,7 +1273,7 @@ onMounted(async () => {
           </label>
           <label>
             <span>起始端口</span>
-            <input v-model="importForm.firstListenPort" type="number" min="1" max="65535" placeholder="留空则随机" />
+            <input v-model="importForm.firstListenPort" type="number" min="1" max="65535" placeholder="留空则范围内随机" />
           </label>
           <label class="checkbox">
             <input v-model="importForm.autoStart" type="checkbox" />
@@ -1317,7 +1321,7 @@ onMounted(async () => {
           </label>
           <label>
             <span>固定端口</span>
-            <input v-model="manualForm.listenPort" type="number" min="1" max="65535" placeholder="留空则随机" />
+            <input v-model="manualForm.listenPort" type="number" min="1" max="65535" placeholder="留空则范围内随机" />
           </label>
           <label class="checkbox">
             <input v-model="manualForm.autoStart" type="checkbox" />
@@ -1542,7 +1546,7 @@ onMounted(async () => {
             </label>
             <label>
               <span>固定端口</span>
-              <input v-model="fixedProxyForm.listenPort" type="number" min="1" max="65535" placeholder="例如 1234" />
+              <input v-model="fixedProxyForm.listenPort" type="number" min="1" max="65535" placeholder="留空则范围内随机，例如 1234" />
             </label>
             <label>
               <span>粘性分钟数</span>

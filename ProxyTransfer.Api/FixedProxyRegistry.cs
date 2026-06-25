@@ -16,11 +16,13 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
     private readonly ConcurrentDictionary<Guid, FixedProxyEntry> _entries = new();
     private readonly ProxyTunnelHostOptions _options;
     private readonly UpstreamPoolRegistry _upstreamPools;
+    private readonly ListenPortAllocator _listenPortAllocator;
 
     public FixedProxyRegistry(ProxyTunnelHostOptions options, UpstreamPoolRegistry upstreamPools)
     {
         _options = options;
         _upstreamPools = upstreamPools;
+        _listenPortAllocator = new ListenPortAllocator(options);
     }
 
     public IReadOnlyList<FixedProxyResponse> List()
@@ -120,10 +122,12 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
             {
                 var listenAddress = IPAddress.Parse(entry.ListenAddress);
                 var router = CreateRouter(entry);
+                var listenPort = ResolveListenPort(entry);
                 entry.Tunnel = await CreateTunnelAsync(
                         entry,
                         router,
                         listenAddress,
+                        listenPort,
                         cancellationToken
                     )
                     .ConfigureAwait(false);
@@ -176,6 +180,7 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
         FixedProxyEntry entry,
         IUpstreamRouter router,
         IPAddress listenAddress,
+        int listenPort,
         CancellationToken cancellationToken
     )
     {
@@ -185,12 +190,14 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
                 entry,
                 router,
                 listenAddress,
+                listenPort,
                 cancellationToken
             ),
             Socks5DownstreamProtocol => CreateSocks5TunnelAsync(
                 entry,
                 router,
                 listenAddress,
+                listenPort,
                 cancellationToken
             ),
             _ => throw new InvalidOperationException(
@@ -203,17 +210,12 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
         FixedProxyEntry entry,
         IUpstreamRouter router,
         IPAddress listenAddress,
+        int listenPort,
         CancellationToken cancellationToken
     )
     {
         return await DynamicHttpProxyTunnel
-            .StartAsync(
-                router,
-                listenAddress,
-                entry.RequestedListenPort,
-                entry.PublicHost,
-                cancellationToken
-            )
+            .StartAsync(router, listenAddress, listenPort, entry.PublicHost, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -221,18 +223,27 @@ public sealed class FixedProxyRegistry : IAsyncDisposable
         FixedProxyEntry entry,
         IUpstreamRouter router,
         IPAddress listenAddress,
+        int listenPort,
         CancellationToken cancellationToken
     )
     {
         return await DynamicSocks5ProxyTunnel
-            .StartAsync(
-                router,
-                listenAddress,
-                entry.RequestedListenPort,
-                entry.PublicHost,
-                cancellationToken
-            )
+            .StartAsync(router, listenAddress, listenPort, entry.PublicHost, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private int ResolveListenPort(FixedProxyEntry entry)
+    {
+        var occupiedPorts = _entries
+            .Values.Where(candidate => candidate.Id != entry.Id && candidate.ActiveListenPort > 0)
+            .Select(candidate => candidate.ActiveListenPort)
+            .ToArray();
+
+        return _listenPortAllocator.ResolvePort(
+            entry.ListenAddress,
+            entry.RequestedListenPort,
+            occupiedPorts
+        );
     }
 
     private string ResolveListenAddress(string? candidate)

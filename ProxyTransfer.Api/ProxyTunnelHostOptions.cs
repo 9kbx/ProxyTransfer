@@ -6,6 +6,10 @@ public sealed class ProxyTunnelHostOptions
 
     public string PublicHost { get; set; } = "127.0.0.1";
 
+    public int? ListenPortRangeStart { get; set; }
+
+    public int? ListenPortRangeEnd { get; set; }
+
     public string ApiUrl { get; set; } = "http://0.0.0.0:5080";
 
     public int DefaultStickyMinutes { get; set; } = 10;

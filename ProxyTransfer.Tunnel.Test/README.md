@@ -12,7 +12,7 @@
 - HTTP 代理走 `HttpClientHandler`
 - SOCKS5 代理走 `SocketsHttpHandler`
 
-默认情况下，它会读取 `proxy.txt` 的第一条有效代理来做一对一测试。代理格式支持：
+默认情况下，它会在直接执行 `dotnet run` 时读取 `proxy.txt` 里的全部有效代理并逐条测试。代理格式支持：
 
 - `http://host:port`
 - `socks5://host:port`
@@ -21,19 +21,23 @@
 
 ## 使用方式
 
-### 单代理一对一测试
+### 直接执行 dotnet run
 
 1. 先启动 [ProxyTransfer.Api](../ProxyTransfer.Api) 和 [ProxyTransfer.Web](../ProxyTransfer.Web)
 2. 在管理台导入并启动代理
 3. 在“转发实例”区域复制一个正在运行的下游代理
-4. 把这个代理保存到当前目录的 `proxy.txt` 第一行
+4. 把这些代理保存到当前目录的 `proxy.txt`，每行一条
 5. 运行：
 
 ```bash
 dotnet run --project ProxyTransfer.Tunnel.Test
 ```
 
-也可以显式指定模式：
+这个默认行为会逐条测试文件中的所有有效代理，并输出成功/失败汇总。
+
+### 单代理一对一测试
+
+如果你只想测试单个代理，也可以显式指定模式：
 
 ```bash
 dotnet run --project ProxyTransfer.Tunnel.Test -- single
@@ -105,4 +109,4 @@ dotnet run --project ProxyTransfer.Tunnel.Test -- fixed http://127.0.0.1:1234 --
 http://127.0.0.1:40000
 ```
 
-空行和以 `#` 开头的行会被忽略；如果文件里有多条代理，当前测试程序只会取第一条有效代理。 
+空行和以 `#` 开头的行会被忽略；直接执行 `dotnet run` 或传入文件路径时，测试程序会逐条测试文件里的所有有效代理。 

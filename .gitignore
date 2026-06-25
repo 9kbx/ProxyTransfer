@@ -40,3 +40,5 @@ lerna-debug.log*
 # Local test data
 ProxyTransfer.Tunnel.Test/proxy.txt
 ProxyTransfer.Api/App_Data/
+scripts/.env
+.artifacts
