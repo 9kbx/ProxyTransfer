@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { requestApiKey } from './auth'
 
 type TunnelRecord = {
   id: string
@@ -458,6 +459,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     headers: {
       'Content-Type': 'application/json',
+      'x-apikey': requestApiKey,
       ...(init?.headers ?? {}),
     },
     ...init,

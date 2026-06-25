@@ -3,6 +3,9 @@ using ProxyTransfer.Api;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Services.Configure<ApiKeyAuthOptions>(
+    builder.Configuration.GetSection(ApiKeyAuthOptions.SectionName)
+);
 builder.Services.Configure<ProxyTunnelHostOptions>(builder.Configuration.GetSection("TunnelHost"));
 builder.Services.AddSingleton(static serviceProvider =>
 {
@@ -47,9 +50,49 @@ builder.WebHost.UseUrls(hostOptions.ApiUrl);
 
 var app = builder.Build();
 
+var apiKeyOptions = app.Services.GetRequiredService<IOptions<ApiKeyAuthOptions>>().Value;
+if (string.IsNullOrWhiteSpace(apiKeyOptions.ApiKey))
+{
+    throw new InvalidOperationException("缺少 Auth:ApiKey 配置，无法启动 API 鉴权。");
+}
+
 app.UseCors("frontend");
 app.UseDefaultFiles();
 app.UseStaticFiles();
+app.Use(
+    async (context, next) =>
+    {
+        if (!context.Request.Path.StartsWithSegments("/api"))
+        {
+            await next();
+            return;
+        }
+
+        if (HttpMethods.IsOptions(context.Request.Method))
+        {
+            await next();
+            return;
+        }
+
+        if (!context.Request.Headers.TryGetValue("x-apikey", out var providedApiKey))
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsJsonAsync(new { message = "缺少 x-apikey。" });
+            return;
+        }
+
+        if (!string.Equals(providedApiKey, apiKeyOptions.ApiKey, StringComparison.Ordinal))
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsJsonAsync(new { message = "无效的 x-apikey。" });
+            return;
+        }
+
+        await next();
+    }
+);
+
+app.MapGet("/api/auth/validate", () => Results.Ok(new { valid = true }));
 
 app.MapGet("/api/tunnels", (ProxyTunnelRegistry registry) => Results.Ok(registry.List()));
 
