@@ -33,6 +33,9 @@ switch (options.Mode)
     case TestMode.FixedProxy:
         await RunFixedProxyTestAsync(options, tester, apiClient, logger);
         break;
+    case TestMode.MultiThreadProxy:
+        await RunMultiThreadProxyTestAsync(options, tester, logger);
+        break;
     default:
         throw new InvalidOperationException($"未知的测试模式: {options.Mode}");
 }
@@ -263,6 +266,60 @@ async Task RunFixedProxyTestAsync(
     Environment.ExitCode = failures == 0 ? 0 : 1;
 }
 
+static async Task RunMultiThreadProxyTestAsync(
+    TestOptions options,
+    ForwardedProxySmokeTester tester,
+    ILogger logger,
+    CancellationToken cancellationToken = default
+)
+{
+    var proxy = ResolveSingleProxy(options.ProxySource);
+
+    logger.LogInformation("[模式] 多线程并发代理测试");
+    logger.LogInformation("[配置] 目标代理: {ProxyUri}", proxy.SafeDisplayUri);
+    logger.LogInformation("[配置] 并发线程数: {ThreadCount}", options.ThreadCount);
+
+    var workers = new Task<bool>[options.ThreadCount];
+    for (var workerIndex = 0; workerIndex < workers.Length; workerIndex++)
+    {
+        var workerId = workerIndex + 1;
+        workers[workerIndex] = ExecuteWorkerAsync(workerId);
+    }
+
+    var results = await Task.WhenAll(workers).ConfigureAwait(false);
+    var successCount = results.Count(static item => item);
+    var failureCount = results.Length - successCount;
+
+    logger.LogInformation(
+        "[完成] 多线程并发代理测试结束，总线程数: {TotalCount}，成功: {SuccessCount}，失败: {FailureCount}",
+        results.Length,
+        successCount,
+        failureCount
+    );
+
+    Environment.ExitCode = failureCount == 0 ? 0 : 1;
+
+    async Task<bool> ExecuteWorkerAsync(int workerId)
+    {
+        try
+        {
+            var result = await tester.RunOnceAsync(proxy, cancellationToken).ConfigureAwait(false);
+            logger.LogInformation(
+                "[线程 {WorkerId}] 成功，出口 IP: {Ip}，耗时: {ElapsedMs} ms",
+                workerId,
+                result.ExitIp,
+                result.ElapsedMilliseconds
+            );
+            return true;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "[线程 {WorkerId}] 并发代理测试失败。", workerId);
+            return false;
+        }
+    }
+}
+
 async Task<FixedProxySnapshot?> TryResolveSnapshotSafelyAsync(
     TestOptions options,
     ProxyEndpoint proxy,
@@ -369,8 +426,8 @@ static List<ProxyEndpoint> LoadProxies(string proxyFilePath)
 static bool LooksLikeProxyUri(string value)
 {
     return value.Contains("://", StringComparison.Ordinal)
-           || value.StartsWith("127.", StringComparison.Ordinal)
-           || value.StartsWith("localhost", StringComparison.OrdinalIgnoreCase);
+        || value.StartsWith("127.", StringComparison.Ordinal)
+        || value.StartsWith("localhost", StringComparison.OrdinalIgnoreCase);
 }
 
 static ProxyEndpoint ParseProxy(string line, int lineNumber)
@@ -445,7 +502,11 @@ internal sealed class ForwardedProxySmokeTester
         }
 
         return new HttpClientHandler
-            { Proxy = webProxy, UseProxy = true, ServerCertificateCustomValidationCallback = (_, _, _, _) => true };
+        {
+            Proxy = webProxy,
+            UseProxy = true,
+            ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
+        };
     }
 
     private static HttpMessageHandler CreateSocksHandler(ProxyEndpoint proxy)
@@ -463,8 +524,8 @@ internal sealed class ForwardedProxySmokeTester
             ConnectTimeout = TimeSpan.FromSeconds(10),
             SslOptions = new SslClientAuthenticationOptions()
             {
-                RemoteCertificateValidationCallback = (_, _, _, _) => true
-            }
+                RemoteCertificateValidationCallback = (_, _, _, _) => true,
+            },
         };
     }
 }
@@ -490,6 +551,7 @@ internal sealed class FixedProxyApiClient
     )
     {
         using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        httpClient.DefaultRequestHeaders.Add("x-apikey", "change-me");
         var normalizedBaseUrl = apiBaseUrl.TrimEnd('/');
         using var response = await httpClient
             .GetAsync($"{normalizedBaseUrl}/api/fixed-proxies", cancellationToken)
@@ -547,6 +609,7 @@ internal enum TestMode
 {
     SingleProxy,
     FixedProxy,
+    MultiThreadProxy,
 }
 
 internal sealed record TestOptions(
@@ -555,14 +618,15 @@ internal sealed record TestOptions(
     string? ApiBaseUrl,
     Guid? FixedProxyId,
     int IterationCount,
-    int IntervalSeconds
+    int IntervalSeconds,
+    int ThreadCount
 )
 {
     public static TestOptions Parse(string[] args)
     {
         if (args.Length == 0)
         {
-            return new TestOptions(TestMode.SingleProxy, null, null, null, 8, 8);
+            return new TestOptions(TestMode.SingleProxy, null, null, null, 8, 8, 2);
         }
 
         var mode = TestMode.SingleProxy;
@@ -577,12 +641,21 @@ internal sealed record TestOptions(
             mode = TestMode.FixedProxy;
             index = 1;
         }
+        else if (
+            string.Equals(args[0], "multi", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(args[0], "multi-thread", StringComparison.OrdinalIgnoreCase)
+        )
+        {
+            mode = TestMode.MultiThreadProxy;
+            index = 1;
+        }
 
         string? proxySource = null;
         string? apiBaseUrl = mode == TestMode.FixedProxy ? "http://127.0.0.1:5080" : null;
         Guid? fixedProxyId = null;
         var iterationCount = 8;
         var intervalSeconds = 8;
+        var threadCount = 2;
 
         while (index < args.Length)
         {
@@ -604,6 +677,11 @@ internal sealed record TestOptions(
                 case "--interval-seconds":
                     index++;
                     intervalSeconds = int.Parse(RequireValue(args, index, current));
+                    break;
+                case "--threads":
+                case "--thread-count":
+                    index++;
+                    threadCount = int.Parse(RequireValue(args, index, current));
                     break;
                 default:
                     if (proxySource is null)
@@ -631,13 +709,19 @@ internal sealed record TestOptions(
             throw new ArgumentOutOfRangeException(nameof(args), "--interval-seconds 不能小于 0。");
         }
 
+        if (threadCount <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(args), "--threads 必须大于 0。");
+        }
+
         return new TestOptions(
             mode,
             proxySource,
             apiBaseUrl,
             fixedProxyId,
             iterationCount,
-            intervalSeconds
+            intervalSeconds,
+            threadCount
         );
     }
 

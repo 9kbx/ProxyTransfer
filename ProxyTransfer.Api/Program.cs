@@ -7,22 +7,22 @@ builder.Services.Configure<ApiKeyAuthOptions>(
     builder.Configuration.GetSection(ApiKeyAuthOptions.SectionName)
 );
 builder.Services.Configure<ProxyTunnelHostOptions>(builder.Configuration.GetSection("TunnelHost"));
-builder.Services.AddSingleton(static serviceProvider =>
-{
-    var options = serviceProvider.GetRequiredService<IOptions<ProxyTunnelHostOptions>>().Value;
-    return new ProxyTunnelRegistry(options);
-});
-builder.Services.AddSingleton(static serviceProvider =>
-{
-    var options = serviceProvider.GetRequiredService<IOptions<ProxyTunnelHostOptions>>().Value;
-    return new UpstreamPoolRegistry(options);
-});
-builder.Services.AddSingleton(static serviceProvider =>
-{
-    var options = serviceProvider.GetRequiredService<IOptions<ProxyTunnelHostOptions>>().Value;
-    var upstreamPools = serviceProvider.GetRequiredService<UpstreamPoolRegistry>();
-    return new FixedProxyRegistry(options, upstreamPools);
-});
+builder.Services.AddSingleton<UpstreamPoolRegistry>();
+builder.Services.AddHttpClient<TunnelHostApiClient>(
+    (serviceProvider, client) =>
+    {
+        var options = serviceProvider.GetRequiredService<IOptions<ProxyTunnelHostOptions>>().Value;
+        client.BaseAddress = new Uri(options.ManagementUrl, UriKind.Absolute);
+        var apiKey = string.IsNullOrWhiteSpace(options.ManagementApiKey)
+            ? options.ApiKey
+            : options.ManagementApiKey;
+        if (!string.IsNullOrWhiteSpace(apiKey))
+        {
+            client.DefaultRequestHeaders.Add("x-apikey", apiKey);
+        }
+    }
+);
+builder.Services.AddSingleton<TunnelHostGateway>();
 builder.Services.AddSingleton<ProxyTestService>();
 builder.Services.AddHostedService<UpstreamProbeService>();
 builder.Services.AddCors(options =>
@@ -54,6 +54,23 @@ var apiKeyOptions = app.Services.GetRequiredService<IOptions<ApiKeyAuthOptions>>
 if (string.IsNullOrWhiteSpace(apiKeyOptions.ApiKey))
 {
     throw new InvalidOperationException("缺少 Auth:ApiKey 配置，无法启动 API 鉴权。");
+}
+
+if (string.IsNullOrWhiteSpace(hostOptions.ManagementUrl))
+{
+    throw new InvalidOperationException(
+        "缺少 TunnelHost:ManagementUrl 配置，无法连接 TunnelHost。"
+    );
+}
+
+if (
+    string.IsNullOrWhiteSpace(hostOptions.ManagementApiKey)
+    && string.IsNullOrWhiteSpace(hostOptions.ApiKey)
+)
+{
+    throw new InvalidOperationException(
+        "缺少 TunnelHost:ManagementApiKey 配置，无法调用 TunnelHost。"
+    );
 }
 
 app.UseCors("frontend");
@@ -94,21 +111,29 @@ app.Use(
 
 app.MapGet("/api/auth/validate", () => Results.Ok(new { valid = true }));
 
-app.MapGet("/api/tunnels", (ProxyTunnelRegistry registry) => Results.Ok(registry.List()));
+app.MapGet(
+    "/api/tunnels",
+    async (TunnelHostGateway gateway, CancellationToken cancellationToken) =>
+        Results.Ok(await gateway.ListDirectAsync(cancellationToken).ConfigureAwait(false))
+);
 
-app.MapGet("/api/batches", (ProxyTunnelRegistry registry) => Results.Ok(registry.ListBatches()));
+app.MapGet(
+    "/api/batches",
+    async (TunnelHostGateway gateway, CancellationToken cancellationToken) =>
+        Results.Ok(await gateway.ListDirectBatchesAsync(cancellationToken).ConfigureAwait(false))
+);
 
 app.MapPost(
     "/api/tunnels/import",
     async (
         ImportProxiesRequest request,
-        ProxyTunnelRegistry registry,
+        TunnelHostGateway gateway,
         CancellationToken cancellationToken
     ) =>
     {
         try
         {
-            var created = await registry.ImportAsync(request, cancellationToken);
+            var created = await gateway.ImportDirectAsync(request, cancellationToken);
             return Results.Ok(created);
         }
         catch (Exception ex)
@@ -123,13 +148,13 @@ app.MapPost(
     "/api/tunnels",
     async (
         AddProxyRequest request,
-        ProxyTunnelRegistry registry,
+        TunnelHostGateway gateway,
         CancellationToken cancellationToken
     ) =>
     {
         try
         {
-            var created = await registry.AddAsync(request, cancellationToken);
+            var created = await gateway.AddDirectAsync(request, cancellationToken);
             return Results.Ok(created);
         }
         catch (Exception ex)
@@ -145,13 +170,13 @@ app.MapPost(
     async (
         Guid id,
         StartProxyRequest? request,
-        ProxyTunnelRegistry registry,
+        TunnelHostGateway gateway,
         CancellationToken cancellationToken
     ) =>
     {
         try
         {
-            var started = await registry.StartAsync(id, request, cancellationToken);
+            var started = await gateway.StartDirectAsync(id, request, cancellationToken);
             return started is null ? Results.NotFound() : Results.Ok(started);
         }
         catch (Exception ex)
@@ -164,9 +189,9 @@ app.MapPost(
 
 app.MapPost(
     "/api/tunnels/{id:guid}/stop",
-    async (Guid id, ProxyTunnelRegistry registry) =>
+    async (Guid id, TunnelHostGateway gateway, CancellationToken cancellationToken) =>
     {
-        var stopped = await registry.StopAsync(id);
+        var stopped = await gateway.StopDirectAsync(id, cancellationToken);
         return stopped is null ? Results.NotFound() : Results.Ok(stopped);
     }
 );
@@ -175,14 +200,14 @@ app.MapPost(
     "/api/tunnels/{id:guid}/test",
     async (
         Guid id,
-        ProxyTunnelRegistry registry,
+        TunnelHostGateway gateway,
         ProxyTestService tester,
         CancellationToken cancellationToken
     ) =>
     {
         try
         {
-            var tunnel = registry.Get(id);
+            var tunnel = await gateway.GetDirectAsync(id, cancellationToken).ConfigureAwait(false);
             if (tunnel is null)
             {
                 return Results.NotFound();
@@ -203,7 +228,7 @@ app.MapPost(
     "/api/tunnels/test-batch",
     async (
         BatchTunnelTestRequest request,
-        ProxyTunnelRegistry registry,
+        TunnelHostGateway gateway,
         ProxyTestService tester,
         CancellationToken cancellationToken
     ) =>
@@ -215,8 +240,9 @@ app.MapPost(
                 return Results.BadRequest(new { message = "批次号不能为空。" });
             }
 
-            var candidates = registry
-                .List()
+            var candidates = (
+                await gateway.ListDirectAsync(cancellationToken).ConfigureAwait(false)
+            )
                 .Where(item =>
                     string.Equals(item.BatchId, request.BatchId, StringComparison.OrdinalIgnoreCase)
                 )
@@ -292,11 +318,17 @@ app.MapPost(
 
 app.MapPost(
     "/api/tunnels/stop-batch",
-    async (StopBatchRequest request, ProxyTunnelRegistry registry) =>
+    async (
+        StopBatchRequest request,
+        TunnelHostGateway gateway,
+        CancellationToken cancellationToken
+    ) =>
     {
         try
         {
-            var count = await registry.StopBatchAsync(request.BatchId);
+            var count = await gateway
+                .StopBatchAsync(request.BatchId, cancellationToken)
+                .ConfigureAwait(false);
             return Results.Ok(new { request.BatchId, stoppedCount = count });
         }
         catch (ArgumentException ex)
@@ -483,19 +515,23 @@ app.MapPost(
     }
 );
 
-app.MapGet("/api/fixed-proxies", (FixedProxyRegistry registry) => Results.Ok(registry.List()));
+app.MapGet(
+    "/api/fixed-proxies",
+    async (TunnelHostGateway gateway, CancellationToken cancellationToken) =>
+        Results.Ok(await gateway.ListFixedAsync(cancellationToken).ConfigureAwait(false))
+);
 
 app.MapPost(
     "/api/fixed-proxies",
     async (
         FixedProxyRequest request,
-        FixedProxyRegistry registry,
+        TunnelHostGateway gateway,
         CancellationToken cancellationToken
     ) =>
     {
         try
         {
-            var created = await registry.AddAsync(request, cancellationToken);
+            var created = await gateway.AddFixedAsync(request, cancellationToken);
             return Results.Ok(created);
         }
         catch (Exception ex)
@@ -508,11 +544,11 @@ app.MapPost(
 
 app.MapPost(
     "/api/fixed-proxies/{id:guid}/start",
-    async (Guid id, FixedProxyRegistry registry, CancellationToken cancellationToken) =>
+    async (Guid id, TunnelHostGateway gateway, CancellationToken cancellationToken) =>
     {
         try
         {
-            var started = await registry.StartAsync(id, cancellationToken);
+            var started = await gateway.StartFixedAsync(id, cancellationToken);
             return started is null ? Results.NotFound() : Results.Ok(started);
         }
         catch (Exception ex)
@@ -525,9 +561,9 @@ app.MapPost(
 
 app.MapPost(
     "/api/fixed-proxies/{id:guid}/stop",
-    async (Guid id, FixedProxyRegistry registry) =>
+    async (Guid id, TunnelHostGateway gateway, CancellationToken cancellationToken) =>
     {
-        var stopped = await registry.StopAsync(id);
+        var stopped = await gateway.StopFixedAsync(id, cancellationToken);
         return stopped is null ? Results.NotFound() : Results.Ok(stopped);
     }
 );
@@ -537,21 +573,23 @@ app.MapPost(
     async (
         Guid id,
         ProxyTestRequest? request,
-        FixedProxyRegistry registry,
+        TunnelHostGateway gateway,
         ProxyTestService tester,
         CancellationToken cancellationToken
     ) =>
     {
         try
         {
-            var fixedProxy = registry.Get(id);
+            var fixedProxy = await gateway
+                .GetFixedAsync(id, cancellationToken)
+                .ConfigureAwait(false);
             if (fixedProxy is null)
             {
                 return Results.NotFound();
             }
 
             var result = await tester
-                .TestFixedProxyAsync(fixedProxy, request, registry.Get, cancellationToken)
+                .TestFixedProxyAsync(fixedProxy, request, gateway.GetFixedAsync, cancellationToken)
                 .ConfigureAwait(false);
             return Results.Ok(result);
         }

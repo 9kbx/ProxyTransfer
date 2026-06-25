@@ -30,7 +30,7 @@
 5. 运行：
 
 ```bash
-dotnet run --project ProxyTransfer.Tunnel.Test
+dotnet run
 ```
 
 这个默认行为会逐条测试文件中的所有有效代理，并输出成功/失败汇总。
@@ -40,19 +40,19 @@ dotnet run --project ProxyTransfer.Tunnel.Test
 如果你只想测试单个代理，也可以显式指定模式：
 
 ```bash
-dotnet run --project ProxyTransfer.Tunnel.Test -- single
+dotnet run -- single
 ```
 
 也可以直接传代理地址：
 
 ```bash
-dotnet run --project ProxyTransfer.Tunnel.Test -- single http://127.0.0.1:40000
+dotnet run -- single http://127.0.0.1:40000
 ```
 
 或者指定其它文件路径：
 
 ```bash
-dotnet run --project ProxyTransfer.Tunnel.Test -- single /absolute/path/to/proxy.txt
+dotnet run -- single /absolute/path/to/proxy.txt
 ```
 
 ### 固定下游代理动态切换观察测试
@@ -74,7 +74,7 @@ dotnet run --project ProxyTransfer.Tunnel.Test -- single /absolute/path/to/proxy
 使用方式：
 
 ```bash
-dotnet run --project ProxyTransfer.Tunnel.Test -- fixed http://127.0.0.1:1234
+dotnet run -- fixed http://127.0.0.1:1234
 ```
 
 默认会尝试访问本地 API：`http://127.0.0.1:5080`。
@@ -82,19 +82,19 @@ dotnet run --project ProxyTransfer.Tunnel.Test -- fixed http://127.0.0.1:1234
 如果 API 地址不同，可以显式指定：
 
 ```bash
-dotnet run --project ProxyTransfer.Tunnel.Test -- fixed http://127.0.0.1:1234 --api-base-url http://127.0.0.1:5080
+dotnet run -- fixed http://127.0.0.1:1234 --api-base-url http://127.0.0.1:5080
 ```
 
 如果你已经知道固定入口的 ID，也可以传入，以避免通过 `forwardedProxy` 反查：
 
 ```bash
-dotnet run --project ProxyTransfer.Tunnel.Test -- fixed http://127.0.0.1:1234 --fixed-id 5dcb7df6-7e37-47dc-8d11-31285021bc8c
+dotnet run -- fixed http://127.0.0.1:1234 --fixed-id 5dcb7df6-7e37-47dc-8d11-31285021bc8c
 ```
 
 还可以指定轮询次数和轮询间隔：
 
 ```bash
-dotnet run --project ProxyTransfer.Tunnel.Test -- fixed http://127.0.0.1:1234 --count 12 --interval-seconds 10
+dotnet run -- fixed http://127.0.0.1:1234 --count 12 --interval-seconds 10
 ```
 
 说明：
@@ -102,6 +102,20 @@ dotnet run --project ProxyTransfer.Tunnel.Test -- fixed http://127.0.0.1:1234 --
 - 如果 API 不可达，程序会降级为“只观察出口 IP”
 - 如果总观察时长小于 `stickyMinutes`，且当前上游一直正常，测试期间可能看不到切换
 - 如果出现连接失败，固定入口有机会在后续请求中切换到其它健康上游
+
+多线程测试
+
+```bash
+dotnet run -- multi socks5://127.0.0.1:12345
+```
+
+指定线程数量
+
+
+```bash
+dotnet run -- multi socks5://127.0.0.1:12345 --threads 8
+```
+
 
 ## proxy.txt 示例
 

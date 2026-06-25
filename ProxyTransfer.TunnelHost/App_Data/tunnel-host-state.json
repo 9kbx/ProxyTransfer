@@ -1,0 +1,32 @@
+{
+  "instances": [
+    {
+      "id": "8d517ea0-f22b-4bfa-9c39-40b93d58b2a9",
+      "kind": "pool",
+      "note": "\u6708\u5927\u7406",
+      "batchId": null,
+      "poolId": "\u6708\u4EE3\u7406",
+      "downstreamProtocol": "socks5",
+      "listenAddress": "0.0.0.0",
+      "publicHost": "127.0.0.1",
+      "requestedListenPort": 12345,
+      "lastActiveListenPort": 12345,
+      "desiredRunning": true,
+      "remoteProxy": null,
+      "upstreams": [
+        "socks5://resume9338:4SNFWPnE3R@172.96.7.70:50101",
+        "http://resume9338:4SNFWPnE3R@172.96.7.70:50100",
+        "http://resume9338:4SNFWPnE3R@40.27.110.250:50100",
+        "socks5://resume9338:4SNFWPnE3R@40.27.110.250:50101",
+        "http://resume9338:4SNFWPnE3R@66.93.166.155:50100",
+        "socks5://resume9338:4SNFWPnE3R@66.93.166.155:50101"
+      ],
+      "selectionPolicy": "round-robin",
+      "stickyMinutes": 1,
+      "createdAt": "2026-06-25T06:57:46.411958+00:00",
+      "startedAt": "2026-06-25T07:35:02.353126+00:00",
+      "stoppedAt": null,
+      "lastError": null
+    }
+  ]
+}

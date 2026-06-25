@@ -1,18 +1,39 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using ProxyTransfer.Tunnel;
 
 namespace ProxyTransfer.Api;
 
 public sealed class UpstreamPoolRegistry
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+    };
+
     private readonly ConcurrentDictionary<string, UpstreamPoolEntry> _pools = new(
         StringComparer.OrdinalIgnoreCase
     );
     private readonly ProxyTunnelHostOptions _options;
+    private readonly string _stateFilePath;
+    private readonly ILogger<UpstreamPoolRegistry> _logger;
 
-    public UpstreamPoolRegistry(ProxyTunnelHostOptions options)
+    public UpstreamPoolRegistry(
+        IOptions<ProxyTunnelHostOptions> options,
+        IHostEnvironment environment,
+        ILogger<UpstreamPoolRegistry> logger
+    )
     {
-        _options = options;
+        _options = options.Value;
+        _stateFilePath = ResolveStateFilePath(
+            _options.UpstreamPoolStateFilePath,
+            environment.ContentRootPath
+        );
+        _logger = logger;
+        LoadState();
     }
 
     public IReadOnlyList<UpstreamPoolResponse> ListPools()
@@ -92,6 +113,8 @@ public sealed class UpstreamPoolRegistry
             pool.Touch();
         }
 
+        PersistState();
+
         return new ImportUpstreamPoolResponse(
             pool.PoolId,
             importedCount,
@@ -126,7 +149,7 @@ public sealed class UpstreamPoolRegistry
             throw new InvalidOperationException("请至少选择一种删除方式。");
         }
 
-        var removedCount = 0;
+        int removedCount;
 
         lock (pool.SyncRoot)
         {
@@ -136,6 +159,8 @@ public sealed class UpstreamPoolRegistry
             NormalizeNextIndex(pool);
             pool.Touch();
         }
+
+        PersistState();
 
         return new DeleteUpstreamPoolProxiesResponse(
             pool.PoolId,
@@ -173,7 +198,6 @@ public sealed class UpstreamPoolRegistry
         lock (pool.SyncRoot)
         {
             var candidates = GetHealthyCandidates(pool);
-
             if (candidates.Length == 0)
             {
                 throw new InvalidOperationException($"上游池 {poolId} 当前没有可用代理。");
@@ -287,6 +311,124 @@ public sealed class UpstreamPoolRegistry
         return null;
     }
 
+    public IReadOnlyList<(string PoolId, Guid UpstreamId, ProxyEndpoint Endpoint)> GetProbeTargets()
+    {
+        var targets = new List<(string PoolId, Guid UpstreamId, ProxyEndpoint Endpoint)>();
+        foreach (var pool in _pools.Values)
+        {
+            lock (pool.SyncRoot)
+            {
+                targets.AddRange(pool.Items.Select(item => (pool.PoolId, item.Id, item.Endpoint)));
+            }
+        }
+
+        return targets;
+    }
+
+    private void LoadState()
+    {
+        try
+        {
+            if (!File.Exists(_stateFilePath))
+            {
+                return;
+            }
+
+            var json = File.ReadAllText(_stateFilePath);
+            var state = JsonSerializer.Deserialize<UpstreamPoolState>(json, JsonOptions);
+            if (state?.Pools is null || state.Pools.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var poolDocument in state.Pools)
+            {
+                if (string.IsNullOrWhiteSpace(poolDocument.PoolId))
+                {
+                    continue;
+                }
+
+                _pools[poolDocument.PoolId] = UpstreamPoolEntry.FromDocument(poolDocument);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "加载上游池状态文件失败: {Path}", _stateFilePath);
+        }
+    }
+
+    private void PersistState()
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(_stateFilePath);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var snapshot = new UpstreamPoolState
+            {
+                Pools = _pools
+                    .Values.OrderByDescending(static pool => pool.UpdatedAt)
+                    .Select(static pool => pool.ToDocument())
+                    .ToList(),
+            };
+
+            var tempFilePath = _stateFilePath + ".tmp";
+            var json = JsonSerializer.Serialize(snapshot, JsonOptions);
+            File.WriteAllText(tempFilePath, json);
+            File.Move(tempFilePath, _stateFilePath, true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "保存上游池状态文件失败: {Path}", _stateFilePath);
+        }
+    }
+
+    private UpstreamPoolEntry GetPoolEntry(string poolId)
+    {
+        if (string.IsNullOrWhiteSpace(poolId))
+        {
+            throw new ArgumentException("上游池 ID 不能为空。", nameof(poolId));
+        }
+
+        if (!_pools.TryGetValue(poolId.Trim(), out var pool))
+        {
+            throw new InvalidOperationException($"未找到上游池: {poolId}");
+        }
+
+        return pool;
+    }
+
+    private UpstreamProxyEntry GetPoolItem(string poolId, Guid upstreamId)
+    {
+        var pool = GetPoolEntry(poolId);
+        lock (pool.SyncRoot)
+        {
+            return pool.Items.FirstOrDefault(item => item.Id == upstreamId)
+                ?? throw new InvalidOperationException($"未找到上游代理: {upstreamId}");
+        }
+    }
+
+    private UpstreamProxyEntry? TryGetPoolItem(string poolId, Guid upstreamId)
+    {
+        if (string.IsNullOrWhiteSpace(poolId))
+        {
+            return null;
+        }
+
+        if (!_pools.TryGetValue(poolId.Trim(), out var pool))
+        {
+            return null;
+        }
+
+        lock (pool.SyncRoot)
+        {
+            return pool.Items.FirstOrDefault(item => item.Id == upstreamId);
+        }
+    }
+
     private static UpstreamProxyEntry[] GetHealthyCandidates(UpstreamPoolEntry pool)
     {
         var now = DateTimeOffset.UtcNow;
@@ -356,71 +498,30 @@ public sealed class UpstreamPoolRegistry
         }
     }
 
-    public IReadOnlyList<(string PoolId, Guid UpstreamId, ProxyEndpoint Endpoint)> GetProbeTargets()
+    private static string ResolveStateFilePath(string configuredPath, string contentRootPath)
     {
-        var targets = new List<(string PoolId, Guid UpstreamId, ProxyEndpoint Endpoint)>();
-        foreach (var pool in _pools.Values)
-        {
-            lock (pool.SyncRoot)
-            {
-                targets.AddRange(pool.Items.Select(item => (pool.PoolId, item.Id, item.Endpoint)));
-            }
-        }
+        var path = string.IsNullOrWhiteSpace(configuredPath)
+            ? "App_Data/upstream-pools.json"
+            : configuredPath.Trim();
 
-        return targets;
-    }
-
-    private UpstreamPoolEntry GetPoolEntry(string poolId)
-    {
-        if (string.IsNullOrWhiteSpace(poolId))
-        {
-            throw new ArgumentException("上游池 ID 不能为空。", nameof(poolId));
-        }
-
-        if (!_pools.TryGetValue(poolId.Trim(), out var pool))
-        {
-            throw new InvalidOperationException($"未找到上游池: {poolId}");
-        }
-
-        return pool;
-    }
-
-    private UpstreamProxyEntry GetPoolItem(string poolId, Guid upstreamId)
-    {
-        var pool = GetPoolEntry(poolId);
-        lock (pool.SyncRoot)
-        {
-            return pool.Items.FirstOrDefault(item => item.Id == upstreamId)
-                ?? throw new InvalidOperationException($"未找到上游代理: {upstreamId}");
-        }
-    }
-
-    private UpstreamProxyEntry? TryGetPoolItem(string poolId, Guid upstreamId)
-    {
-        if (string.IsNullOrWhiteSpace(poolId))
-        {
-            return null;
-        }
-
-        if (!_pools.TryGetValue(poolId.Trim(), out var pool))
-        {
-            return null;
-        }
-
-        lock (pool.SyncRoot)
-        {
-            return pool.Items.FirstOrDefault(item => item.Id == upstreamId);
-        }
+        return Path.IsPathRooted(path) ? path : Path.Combine(contentRootPath, path);
     }
 
     private sealed class UpstreamPoolEntry
     {
-        public UpstreamPoolEntry(string poolId, string? note)
+        public UpstreamPoolEntry(
+            string poolId,
+            string? note,
+            DateTimeOffset? createdAt = null,
+            DateTimeOffset? updatedAt = null,
+            int nextIndex = -1
+        )
         {
             PoolId = poolId;
             Note = note;
-            CreatedAt = DateTimeOffset.UtcNow;
-            UpdatedAt = CreatedAt;
+            CreatedAt = createdAt ?? DateTimeOffset.UtcNow;
+            UpdatedAt = updatedAt ?? CreatedAt;
+            NextIndex = nextIndex;
         }
 
         public string PoolId { get; }
@@ -431,15 +532,51 @@ public sealed class UpstreamPoolRegistry
 
         public object SyncRoot { get; } = new();
 
-        public int NextIndex { get; set; } = -1;
+        public int NextIndex { get; set; }
 
         public DateTimeOffset CreatedAt { get; }
 
         public DateTimeOffset UpdatedAt { get; private set; }
 
+        public static UpstreamPoolEntry FromDocument(UpstreamPoolStateItemDocument document)
+        {
+            var pool = new UpstreamPoolEntry(
+                document.PoolId,
+                document.Note,
+                document.CreatedAt,
+                document.UpdatedAt,
+                document.NextIndex
+            );
+
+            foreach (var itemDocument in document.Items)
+            {
+                if (string.IsNullOrWhiteSpace(itemDocument.Proxy))
+                {
+                    continue;
+                }
+
+                pool.Items.Add(UpstreamProxyEntry.FromDocument(itemDocument));
+            }
+
+            NormalizeNextIndex(pool);
+            return pool;
+        }
+
         public void Touch()
         {
             UpdatedAt = DateTimeOffset.UtcNow;
+        }
+
+        public UpstreamPoolStateItemDocument ToDocument()
+        {
+            return new UpstreamPoolStateItemDocument(
+                PoolId,
+                Note,
+                NextIndex,
+                CreatedAt,
+                UpdatedAt,
+                Items.Select(static item => item.ToDocument()).ToArray()
+            );
         }
 
         public UpstreamPoolResponse ToResponse()
@@ -485,12 +622,29 @@ public sealed class UpstreamPoolRegistry
 
     private sealed class UpstreamProxyEntry
     {
-        public UpstreamProxyEntry(Guid id, ProxyEndpoint endpoint)
+        public UpstreamProxyEntry(
+            Guid id,
+            ProxyEndpoint endpoint,
+            UpstreamProxyStatus status = UpstreamProxyStatus.Unknown,
+            int failureCount = 0,
+            DateTimeOffset? createdAt = null,
+            DateTimeOffset? lastCheckedAt = null,
+            DateTimeOffset? lastSuccessAt = null,
+            DateTimeOffset? lastFailureAt = null,
+            DateTimeOffset? disabledUntil = null,
+            string? lastError = null
+        )
         {
             Id = id;
             Endpoint = endpoint;
-            CreatedAt = DateTimeOffset.UtcNow;
-            Status = UpstreamProxyStatus.Unknown;
+            Status = status;
+            FailureCount = failureCount;
+            CreatedAt = createdAt ?? DateTimeOffset.UtcNow;
+            LastCheckedAt = lastCheckedAt;
+            LastSuccessAt = lastSuccessAt;
+            LastFailureAt = lastFailureAt;
+            DisabledUntil = disabledUntil;
+            LastError = lastError;
         }
 
         public Guid Id { get; }
@@ -517,6 +671,22 @@ public sealed class UpstreamPoolRegistry
 
         public bool IsHealthy => DisabledUntil is null || DisabledUntil <= DateTimeOffset.UtcNow;
 
+        public static UpstreamProxyEntry FromDocument(UpstreamProxyStateItemDocument document)
+        {
+            return new UpstreamProxyEntry(
+                document.Id,
+                ProxyEndpoint.Parse(document.Proxy),
+                ParseStatus(document.Status),
+                document.FailureCount,
+                document.CreatedAt,
+                document.LastCheckedAt,
+                document.LastSuccessAt,
+                document.LastFailureAt,
+                document.DisabledUntil,
+                document.LastError
+            );
+        }
+
         public UpstreamProxyResponse ToResponse(string poolId)
         {
             return new UpstreamProxyResponse(
@@ -534,6 +704,29 @@ public sealed class UpstreamPoolRegistry
                 LastError
             );
         }
+
+        public UpstreamProxyStateItemDocument ToDocument()
+        {
+            return new UpstreamProxyStateItemDocument(
+                Id,
+                Endpoint.ProxyUri,
+                Status.ToString(),
+                FailureCount,
+                CreatedAt,
+                LastCheckedAt,
+                LastSuccessAt,
+                LastFailureAt,
+                DisabledUntil,
+                LastError
+            );
+        }
+    }
+
+    private static UpstreamProxyStatus ParseStatus(string? value)
+    {
+        return Enum.TryParse<UpstreamProxyStatus>(value, ignoreCase: true, out var status)
+            ? status
+            : UpstreamProxyStatus.Unknown;
     }
 
     private enum UpstreamProxyStatus

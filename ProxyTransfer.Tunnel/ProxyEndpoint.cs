@@ -16,11 +16,12 @@ public sealed record ProxyEndpoint(
     string? Password = null
 )
 {
-    public string ProxyUri => $"{GetScheme(Protocol)}://{FormatHost(Host)}:{Port}";
+    public string ProxyUri =>
+        $"{GetScheme(Protocol)}://{BuildUserInfo(UserName, Password)}{FormatHost(Host)}:{Port}";
 
     public string SafeDisplayUri =>
         string.IsNullOrWhiteSpace(UserName)
-            ? ProxyUri
+            ? $"{GetScheme(Protocol)}://{FormatHost(Host)}:{Port}"
             : $"{GetScheme(Protocol)}://{UserName}:***@{FormatHost(Host)}:{Port}";
 
     public bool HasCredentials => !string.IsNullOrWhiteSpace(UserName);
@@ -80,6 +81,18 @@ public sealed record ProxyEndpoint(
 
     private static string GetScheme(ProxyProtocol protocol) =>
         protocol == ProxyProtocol.Http ? Uri.UriSchemeHttp : "socks5";
+
+    private static string BuildUserInfo(string? userName, string? password)
+    {
+        if (string.IsNullOrWhiteSpace(userName))
+        {
+            return string.Empty;
+        }
+
+        var escapedUserName = Uri.EscapeDataString(userName);
+        var escapedPassword = password is null ? string.Empty : Uri.EscapeDataString(password);
+        return $"{escapedUserName}:{escapedPassword}@";
+    }
 
     private static string FormatHost(string host) =>
         host.Contains(':', StringComparison.Ordinal)

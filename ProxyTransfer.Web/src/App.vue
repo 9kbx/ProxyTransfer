@@ -203,8 +203,17 @@ const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.re
 
 const activeView = ref<ViewMode>('classic')
 
-function resolvePortPayload(portText: string): number {
-  return portText.trim() ? Number(portText) : -1
+function resolvePortPayload(portValue: string | number | null | undefined): number {
+  if (typeof portValue === 'number') {
+    return Number.isFinite(portValue) && portValue > 0 ? portValue : -1
+  }
+
+  if (typeof portValue !== 'string') {
+    return -1
+  }
+
+  const normalized = portValue.trim()
+  return normalized ? Number(normalized) : -1
 }
 
 const importForm = reactive({

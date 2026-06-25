@@ -84,9 +84,9 @@ public sealed class DynamicHttpProxyTunnel : IProxyTunnel
         }
 
         _disposed = true;
-        _cts.Cancel();
+        await _cts.CancelAsync();
         _server.Stop();
-        _stopRegistration.Dispose();
+        await _stopRegistration.DisposeAsync();
 
         try
         {

@@ -1,13 +1,13 @@
 using System.Net;
 using System.Net.Sockets;
 
-namespace ProxyTransfer.Api;
+namespace ProxyTransfer.TunnelHost;
 
 internal sealed class ListenPortAllocator
 {
-    private readonly ProxyTunnelHostOptions _options;
+    private readonly TunnelHostOptions _options;
 
-    public ListenPortAllocator(ProxyTunnelHostOptions options)
+    public ListenPortAllocator(TunnelHostOptions options)
     {
         _options = options;
         ValidateRange();

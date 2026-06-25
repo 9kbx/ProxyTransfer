@@ -184,7 +184,7 @@ public sealed class ProxyTestService
     public async Task<ProxyTestResponse> TestFixedProxyAsync(
         FixedProxyResponse fixedProxy,
         ProxyTestRequest? request,
-        Func<Guid, FixedProxyResponse?> snapshotResolver,
+        Func<Guid, CancellationToken, Task<FixedProxyResponse?>> snapshotResolver,
         CancellationToken cancellationToken
     )
     {
@@ -235,7 +235,8 @@ public sealed class ProxyTestService
                 lastExitIp = probe.ExitIp;
                 observedExitIps.Add(probe.ExitIp);
 
-                var snapshot = snapshotResolver(fixedProxy.Id);
+                var snapshot = await snapshotResolver(fixedProxy.Id, cancellationToken)
+                    .ConfigureAwait(false);
                 var currentUpstream = snapshot?.LastSelectedUpstreamDisplay;
                 if (!string.IsNullOrWhiteSpace(currentUpstream))
                 {
