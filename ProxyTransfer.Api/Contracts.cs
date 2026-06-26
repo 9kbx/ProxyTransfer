@@ -227,3 +227,5 @@ public sealed record BatchTunnelTestResponse(
     int FailureCount,
     IReadOnlyList<BatchTunnelTestItemResponse> Items
 );
+
+public sealed record PortRangeResponse(int? StartPort, int? EndPort, string? Message);

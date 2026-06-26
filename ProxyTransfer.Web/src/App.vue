@@ -168,6 +168,12 @@ type ProxyTestResult = {
   logs: ProxyTestLogRecord[]
 }
 
+type PortRangeResponse = {
+  startPort: number | null
+  endPort: number | null
+  message: string | null
+}
+
 type ViewMode = 'classic' | 'fixed'
 type SelectionPolicy = 'sticky' | 'round-robin' | 'least-failures'
 
@@ -267,6 +273,19 @@ const fixedProxyForm = reactive({
 const fixedTestForm = reactive({
   iterationCount: '6',
   intervalSeconds: '5',
+})
+
+const portRange = ref<PortRangeResponse | null>(null)
+
+const portRangeHint = computed(() => {
+  const range = portRange.value
+  if (!range) {
+    return '正在获取可用端口范围...'
+  }
+  if (range.startPort && range.endPort) {
+    return `可用端口范围: ${range.startPort}–${range.endPort}`
+  }
+  return range.message ?? '未配置端口范围，系统将使用随机端口。'
 })
 
 const tunnels = ref<TunnelRecord[]>([])
@@ -1185,6 +1204,13 @@ onMounted(async () => {
   await withBusy(async () => {
     await refreshActiveView()
   })
+
+  // 获取端口范围（非关键，失败不阻塞页面）
+  try {
+    portRange.value = await apiFetch<PortRangeResponse>('/api/port-range')
+  } catch {
+    portRange.value = { startPort: null, endPort: null, message: '无法获取端口范围信息。' }
+  }
 })
 </script>
 
@@ -1299,6 +1325,7 @@ onMounted(async () => {
           <label>
             <span>起始端口</span>
             <input v-model="importForm.firstListenPort" type="number" min="1" max="65535" placeholder="留空则范围内随机" />
+            <small class="field-help">{{ portRangeHint }}</small>
           </label>
           <label class="checkbox">
             <input v-model="importForm.autoStart" type="checkbox" />
@@ -1347,6 +1374,7 @@ onMounted(async () => {
           <label>
             <span>固定端口</span>
             <input v-model="manualForm.listenPort" type="number" min="1" max="65535" placeholder="留空则范围内随机" />
+            <small class="field-help">{{ portRangeHint }}</small>
           </label>
           <label class="checkbox">
             <input v-model="manualForm.autoStart" type="checkbox" />
@@ -1572,6 +1600,7 @@ onMounted(async () => {
             <label>
               <span>固定端口</span>
               <input v-model="fixedProxyForm.listenPort" type="number" min="1" max="65535" placeholder="留空则范围内随机，例如 1234" />
+              <small class="field-help">{{ portRangeHint }}</small>
             </label>
             <label>
               <span>粘性分钟数</span>

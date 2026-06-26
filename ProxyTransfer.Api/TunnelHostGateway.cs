@@ -278,6 +278,11 @@ internal sealed class TunnelHostGateway
         return await _client.DeleteAsync(id, cancellationToken).ConfigureAwait(false);
     }
 
+    public Task<TunnelHostPortRangeResponse> GetPortRangeAsync(CancellationToken cancellationToken)
+    {
+        return _client.GetPortRangeAsync(cancellationToken);
+    }
+
     private ProxyTunnelResponse MapDirect(TunnelHostInstanceResponse instance)
     {
         return new ProxyTunnelResponse(

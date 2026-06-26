@@ -91,6 +91,16 @@ internal sealed class TunnelHostApiClient
         return SendDeleteAsync($"/api/instances/{id}", cancellationToken);
     }
 
+    public Task<TunnelHostPortRangeResponse> GetPortRangeAsync(CancellationToken cancellationToken)
+    {
+        return SendAsync<TunnelHostPortRangeResponse>(
+            HttpMethod.Get,
+            "/api/host/port-range",
+            null,
+            cancellationToken
+        );
+    }
+
     private async Task<bool> SendDeleteAsync(
         string relativeUrl,
         CancellationToken cancellationToken

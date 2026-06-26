@@ -115,5 +115,6 @@ app.MapTunnelEndpoints();
 app.MapUpstreamPoolEndpoints();
 app.MapFixedProxyEndpoints();
 app.MapTestHistoryEndpoints();
+app.MapSystemEndpoints();
 
 app.Run();

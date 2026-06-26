@@ -42,6 +42,8 @@ public sealed record TunnelHostStatusResponse(
     DateTimeOffset StartedAt
 );
 
+public sealed record TunnelHostPortRangeResponse(int? StartPort, int? EndPort, string? Message);
+
 public sealed record TunnelInstanceResponse(
     Guid Id,
     string NodeId,

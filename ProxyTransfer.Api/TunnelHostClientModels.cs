@@ -62,3 +62,5 @@ internal sealed record TunnelHostInstanceResponse(
     DateTimeOffset? StoppedAt,
     string? LastError
 );
+
+internal sealed record TunnelHostPortRangeResponse(int? StartPort, int? EndPort, string? Message);

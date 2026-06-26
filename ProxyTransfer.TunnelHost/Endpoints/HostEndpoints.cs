@@ -12,6 +12,32 @@ internal static class HostEndpoints
                 Results.Ok(registry.GetHostStatus(options.Value))
         );
 
+        app.MapGet(
+            "/api/host/port-range",
+            (IOptions<TunnelHostOptions> options) =>
+            {
+                var opts = options.Value;
+                if (!opts.ListenPortRangeStart.HasValue || !opts.ListenPortRangeEnd.HasValue)
+                {
+                    return Results.Ok(
+                        new TunnelHostPortRangeResponse(
+                            null,
+                            null,
+                            "未配置端口范围，系统将使用操作系统随机端口。"
+                        )
+                    );
+                }
+
+                return Results.Ok(
+                    new TunnelHostPortRangeResponse(
+                        opts.ListenPortRangeStart.Value,
+                        opts.ListenPortRangeEnd.Value,
+                        null
+                    )
+                );
+            }
+        );
+
         app.MapGet("/api/instances", (TunnelHostRegistry registry) => Results.Ok(registry.List()));
 
         app.MapGet(
