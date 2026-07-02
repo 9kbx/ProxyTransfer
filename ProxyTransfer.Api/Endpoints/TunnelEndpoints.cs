@@ -103,6 +103,7 @@ internal static class TunnelEndpoints
             "/api/tunnels/{id:guid}/test",
             async (
                 Guid id,
+                TunnelTestRequest? request,
                 TunnelHostGateway gateway,
                 ProxyTestService tester,
                 CancellationToken cancellationToken
@@ -119,7 +120,7 @@ internal static class TunnelEndpoints
                     }
 
                     var result = await tester
-                        .TestTunnelAsync(tunnel, cancellationToken)
+                        .TestTunnelAsync(tunnel, request?.TestProvider, cancellationToken)
                         .ConfigureAwait(false);
                     return Results.Ok(result);
                 }
@@ -180,7 +181,7 @@ internal static class TunnelEndpoints
                         try
                         {
                             var result = await tester
-                                .TestTunnelAsync(tunnel, cancellationToken)
+                                .TestTunnelAsync(tunnel, request.TestProvider, cancellationToken)
                                 .ConfigureAwait(false);
                             successCount++;
                             items.Add(

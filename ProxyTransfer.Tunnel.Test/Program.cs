@@ -53,13 +53,17 @@ static async Task RunSingleProxyTestAsync(
 
         logger.LogInformation("[模式] 单代理一对一测试");
         logger.LogInformation("[配置] 目标代理: {ProxyUri}", proxy.SafeDisplayUri);
+        logger.LogInformation("[配置] 测试接口: {Provider}", options.TestProvider);
 
-        var result = await tester.RunOnceAsync(proxy, cancellationToken).ConfigureAwait(false);
+        var result = await tester
+            .RunOnceAsync(proxy, options.TestProvider, cancellationToken)
+            .ConfigureAwait(false);
 
         logger.LogInformation(
-            "[完成] 单代理测试完成，代理: {ProxyUri}，出口 IP: {Ip}，耗时: {ElapsedMs} ms",
+            "[完成] 单代理测试完成，代理: {ProxyUri}，测试接口: {Provider}，出口: {Location}，耗时: {ElapsedMs} ms",
             proxy.SafeDisplayUri,
-            result.ExitIp,
+            result.TestProvider,
+            result.LocationSummary,
             result.ElapsedMilliseconds
         );
 
@@ -74,6 +78,7 @@ static async Task RunSingleProxyTestAsync(
     logger.LogInformation("[模式] proxy.txt 批量测试");
     logger.LogInformation("[配置] 代理文件: {ProxyFilePath}", proxyFilePath);
     logger.LogInformation("[配置] 代理数量: {ProxyCount}", proxies.Count);
+    logger.LogInformation("[配置] 测试接口: {Provider}", options.TestProvider);
 
     for (var index = 0; index < proxies.Count; index++)
     {
@@ -81,13 +86,16 @@ static async Task RunSingleProxyTestAsync(
 
         try
         {
-            var result = await tester.RunOnceAsync(proxy, cancellationToken).ConfigureAwait(false);
+            var result = await tester
+                .RunOnceAsync(proxy, options.TestProvider, cancellationToken)
+                .ConfigureAwait(false);
             logger.LogInformation(
-                "[完成] ({Index}/{Total}) 代理: {ProxyUri}，出口 IP: {Ip}，耗时: {ElapsedMs} ms",
+                "[完成] ({Index}/{Total}) 代理: {ProxyUri}，测试接口: {Provider}，出口: {Location}，耗时: {ElapsedMs} ms",
                 index + 1,
                 proxies.Count,
                 proxy.SafeDisplayUri,
-                result.ExitIp,
+                result.TestProvider,
+                result.LocationSummary,
                 result.ElapsedMilliseconds
             );
         }
@@ -126,6 +134,7 @@ async Task RunFixedProxyTestAsync(
 
     logger.LogInformation("[模式] 固定下游代理动态切换观察测试");
     logger.LogInformation("[配置] 固定下游代理: {ProxyUri}", proxy.SafeDisplayUri);
+    logger.LogInformation("[配置] 测试接口: {Provider}", options.TestProvider);
     logger.LogInformation(
         "[配置] 轮询次数: {IterationCount}，间隔: {IntervalSeconds} 秒",
         options.IterationCount,
@@ -197,7 +206,9 @@ async Task RunFixedProxyTestAsync(
     {
         try
         {
-            var result = await tester.RunOnceAsync(proxy, cancellationToken).ConfigureAwait(false);
+            var result = await tester
+                .RunOnceAsync(proxy, options.TestProvider, cancellationToken)
+                .ConfigureAwait(false);
 
             snapshot = await TryResolveSnapshotSafelyAsync(
                     options,
@@ -225,10 +236,11 @@ async Task RunFixedProxyTestAsync(
                 );
 
             logger.LogInformation(
-                "[观察] ({Attempt}/{Total}) 出口 IP: {ExitIp}，最近上游: {CurrentUpstream}，出口切换: {ExitChanged}，上游切换: {UpstreamChanged}",
+                "[观察] ({Attempt}/{Total}) 测试接口: {Provider}，出口: {Location}，最近上游: {CurrentUpstream}，出口切换: {ExitChanged}，上游切换: {UpstreamChanged}",
                 attempt,
                 options.IterationCount,
-                result.ExitIp,
+                result.TestProvider,
+                result.LocationSummary,
                 currentUpstream ?? "未知",
                 exitChanged ? "是" : "否",
                 upstreamChanged ? "是" : "否"
@@ -278,6 +290,7 @@ static async Task RunMultiThreadProxyTestAsync(
     logger.LogInformation("[模式] 多线程并发代理测试");
     logger.LogInformation("[配置] 目标代理: {ProxyUri}", proxy.SafeDisplayUri);
     logger.LogInformation("[配置] 并发线程数: {ThreadCount}", options.ThreadCount);
+    logger.LogInformation("[配置] 测试接口: {Provider}", options.TestProvider);
 
     var workers = new Task<bool>[options.ThreadCount];
     for (var workerIndex = 0; workerIndex < workers.Length; workerIndex++)
@@ -303,11 +316,14 @@ static async Task RunMultiThreadProxyTestAsync(
     {
         try
         {
-            var result = await tester.RunOnceAsync(proxy, cancellationToken).ConfigureAwait(false);
+            var result = await tester
+                .RunOnceAsync(proxy, options.TestProvider, cancellationToken)
+                .ConfigureAwait(false);
             logger.LogInformation(
-                "[线程 {WorkerId}] 成功，出口 IP: {Ip}，耗时: {ElapsedMs} ms",
+                "[线程 {WorkerId}] 成功，测试接口: {Provider}，出口: {Location}，耗时: {ElapsedMs} ms",
                 workerId,
-                result.ExitIp,
+                result.TestProvider,
+                result.LocationSummary,
                 result.ElapsedMilliseconds
             );
             return true;
@@ -444,7 +460,8 @@ static ProxyEndpoint ParseProxy(string line, int lineNumber)
 
 internal sealed class ForwardedProxySmokeTester
 {
-    private static readonly Uri ProbeUri = new("https://api.ipify.org/");
+    private static readonly Uri IfconfigProbeUri = new("https://ifconfig.co/json");
+    private static readonly Uri IpifyProbeUri = new("https://api.ipify.org/");
 
     private readonly ILogger<ForwardedProxySmokeTester> _logger;
 
@@ -455,32 +472,175 @@ internal sealed class ForwardedProxySmokeTester
 
     public async Task<ProxyProbeResult> RunOnceAsync(
         ProxyEndpoint proxy,
+        string testProvider,
         CancellationToken cancellationToken = default
     )
     {
+        var target = ResolveProbeTarget(testProvider);
+
         using var handler = CreateHandler(proxy);
 
         using var httpClient = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
 
-        _logger.LogInformation("[测试] 开始验证 {ProxyUri}", proxy.SafeDisplayUri);
+        _logger.LogInformation(
+            "[测试] 开始验证 {ProxyUri}，测试接口: {Provider}",
+            proxy.SafeDisplayUri,
+            target.Provider
+        );
 
         var startedAt = DateTimeOffset.Now;
         var stopwatch = Stopwatch.StartNew();
-        using var response = await httpClient.GetAsync(ProbeUri, cancellationToken);
+        using var response = await httpClient.GetAsync(target.Uri, cancellationToken);
         response.EnsureSuccessStatusCode();
 
         var body = (await response.Content.ReadAsStringAsync(cancellationToken)).Trim();
         stopwatch.Stop();
-
         _logger.LogInformation(
-            "[成功] {ProxyUri} 出口 IP: {Ip}，开始时间: {StartedAt:HH:mm:ss.fff}，耗时: {ElapsedMs} ms",
-            proxy.SafeDisplayUri,
+            "[第三方响应] Provider: {Provider}，URL: {Url}，Status: {StatusCode}，Body: {Body}",
+            target.Provider,
+            target.Uri,
+            (int)response.StatusCode,
+            body
+        );
+        var result = ParseProbeResult(
+            target.Provider,
             body,
             startedAt,
             stopwatch.ElapsedMilliseconds
         );
 
-        return new ProxyProbeResult(body, startedAt, stopwatch.ElapsedMilliseconds);
+        _logger.LogInformation(
+            "[成功] {ProxyUri} 测试接口: {Provider}，出口: {Location}，开始时间: {StartedAt:HH:mm:ss.fff}，耗时: {ElapsedMs} ms",
+            proxy.SafeDisplayUri,
+            result.TestProvider,
+            result.LocationSummary,
+            result.StartedAt,
+            result.ElapsedMilliseconds
+        );
+
+        return result;
+    }
+
+    private static ProxyProbeTarget ResolveProbeTarget(string provider)
+    {
+        var normalized = NormalizeProvider(provider);
+        return normalized switch
+        {
+            "ifconfig" => new ProxyProbeTarget("ifconfig", IfconfigProbeUri),
+            "ipify" => new ProxyProbeTarget("ipify", IpifyProbeUri),
+            _ => throw new ArgumentException(
+                $"不支持的测试接口: {provider}。可选值: ifconfig, ipify。",
+                nameof(provider)
+            ),
+        };
+    }
+
+    private static string NormalizeProvider(string? provider)
+    {
+        return string.IsNullOrWhiteSpace(provider)
+            ? "ifconfig"
+            : provider.Trim().ToLowerInvariant();
+    }
+
+    private static ProxyProbeResult ParseProbeResult(
+        string provider,
+        string body,
+        DateTimeOffset startedAt,
+        long elapsedMilliseconds
+    )
+    {
+        return provider switch
+        {
+            "ifconfig" => ParseIfconfigResult(body, startedAt, elapsedMilliseconds),
+            "ipify" => ParseIpifyResult(body, startedAt, elapsedMilliseconds),
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(provider),
+                provider,
+                "不支持的测试接口。"
+            ),
+        };
+    }
+
+    private static ProxyProbeResult ParseIfconfigResult(
+        string body,
+        DateTimeOffset startedAt,
+        long elapsedMilliseconds
+    )
+    {
+        using var document = JsonDocument.Parse(body);
+        var root = document.RootElement;
+        var exitIp = ReadRequiredString(root, "ip");
+        var country = ReadOptionalString(root, "country");
+        var regionName = ReadOptionalString(root, "region_name");
+        var city = ReadOptionalString(root, "city");
+
+        return new ProxyProbeResult(
+            exitIp,
+            country,
+            regionName,
+            city,
+            "ifconfig",
+            startedAt,
+            elapsedMilliseconds
+        );
+    }
+
+    private static ProxyProbeResult ParseIpifyResult(
+        string body,
+        DateTimeOffset startedAt,
+        long elapsedMilliseconds
+    )
+    {
+        if (body.StartsWith('{'))
+        {
+            using var document = JsonDocument.Parse(body);
+            var exitIp = ReadRequiredString(document.RootElement, "ip");
+            return new ProxyProbeResult(
+                exitIp,
+                null,
+                null,
+                null,
+                "ipify",
+                startedAt,
+                elapsedMilliseconds
+            );
+        }
+
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            throw new InvalidOperationException("测试接口返回为空，无法解析出口 IP。");
+        }
+
+        return new ProxyProbeResult(
+            body,
+            null,
+            null,
+            null,
+            "ipify",
+            startedAt,
+            elapsedMilliseconds
+        );
+    }
+
+    private static string ReadRequiredString(JsonElement root, string propertyName)
+    {
+        var value = ReadOptionalString(root, propertyName);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new InvalidOperationException($"测试接口响应缺少字段: {propertyName}。");
+        }
+
+        return value;
+    }
+
+    private static string? ReadOptionalString(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind == JsonValueKind.String ? value.GetString()?.Trim() : null;
     }
 
     private static HttpMessageHandler CreateHandler(ProxyEndpoint proxy)
@@ -532,9 +692,28 @@ internal sealed class ForwardedProxySmokeTester
 
 internal sealed record ProxyProbeResult(
     string ExitIp,
+    string? Country,
+    string? RegionName,
+    string? City,
+    string TestProvider,
     DateTimeOffset StartedAt,
     long ElapsedMilliseconds
-);
+)
+{
+    public string LocationSummary
+    {
+        get
+        {
+            var parts = new[] { Country, RegionName, City }
+                .Where(static item => !string.IsNullOrWhiteSpace(item))
+                .ToArray();
+
+            return parts.Length == 0 ? ExitIp : $"{ExitIp} / {string.Join(" / ", parts)}";
+        }
+    }
+}
+
+internal sealed record ProxyProbeTarget(string Provider, Uri Uri);
 
 internal sealed class FixedProxyApiClient
 {
@@ -619,14 +798,15 @@ internal sealed record TestOptions(
     Guid? FixedProxyId,
     int IterationCount,
     int IntervalSeconds,
-    int ThreadCount
+    int ThreadCount,
+    string TestProvider
 )
 {
     public static TestOptions Parse(string[] args)
     {
         if (args.Length == 0)
         {
-            return new TestOptions(TestMode.SingleProxy, null, null, null, 8, 8, 2);
+            return new TestOptions(TestMode.SingleProxy, null, null, null, 8, 8, 2, "ifconfig");
         }
 
         var mode = TestMode.SingleProxy;
@@ -656,6 +836,7 @@ internal sealed record TestOptions(
         var iterationCount = 8;
         var intervalSeconds = 8;
         var threadCount = 2;
+        var testProvider = "ifconfig";
 
         while (index < args.Length)
         {
@@ -682,6 +863,11 @@ internal sealed record TestOptions(
                 case "--thread-count":
                     index++;
                     threadCount = int.Parse(RequireValue(args, index, current));
+                    break;
+                case "--provider":
+                case "--test-provider":
+                    index++;
+                    testProvider = NormalizeProvider(RequireValue(args, index, current));
                     break;
                 default:
                     if (proxySource is null)
@@ -721,8 +907,22 @@ internal sealed record TestOptions(
             fixedProxyId,
             iterationCount,
             intervalSeconds,
-            threadCount
+            threadCount,
+            testProvider
         );
+    }
+
+    private static string NormalizeProvider(string provider)
+    {
+        var normalized = provider.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "ifconfig" => "ifconfig",
+            "ipify" => "ipify",
+            _ => throw new ArgumentException(
+                $"不支持的测试接口: {provider}。可选值: ifconfig, ipify。"
+            ),
+        };
     }
 
     private static string RequireValue(string[] args, int index, string option)

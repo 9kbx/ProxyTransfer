@@ -11,7 +11,10 @@ namespace ProxyTransfer.Api;
 
 public sealed class ProxyTestService
 {
-    private static readonly Uri ProbeUri = new("https://api.ipify.org/");
+    private const string IfconfigProvider = "ifconfig";
+    private const string IpifyProvider = "ipify";
+    private static readonly Uri IfconfigProbeUri = new("https://ifconfig.co/json");
+    private static readonly Uri IpifyProbeUri = new("https://api.ipify.org/");
     private const int HistoryLimit = 24;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -25,6 +28,7 @@ public sealed class ProxyTestService
     private readonly LinkedList<UpstreamPoolTestResponse> _upstreamPoolHistory = new();
     private readonly string _upstreamPoolHistoryFilePath;
     private readonly ILogger<ProxyTestService> _logger;
+    private readonly string _defaultTestProvider;
 
     public ProxyTestService(
         IOptions<ProxyTunnelHostOptions> options,
@@ -41,6 +45,7 @@ public sealed class ProxyTestService
             options.Value.UpstreamPoolTestHistoryFilePath,
             environment.ContentRootPath
         );
+        _defaultTestProvider = ResolveTestProvider(options.Value.DefaultTestProvider);
         LoadHistory();
         LoadUpstreamPoolHistory();
     }
@@ -143,6 +148,7 @@ public sealed class ProxyTestService
 
     public async Task<ProxyTestResponse> TestTunnelAsync(
         ProxyTunnelResponse tunnel,
+        string? requestedProvider,
         CancellationToken cancellationToken
     )
     {
@@ -153,13 +159,19 @@ public sealed class ProxyTestService
 
         var logs = new List<ProxyTestLogEntry>();
         var forwardedProxy = ProxyEndpoint.Parse(tunnel.ForwardedProxy);
+        var target = ResolveTestTarget(requestedProvider);
 
-        Log(logs, "info", $"开始测试单个代理: {tunnel.ForwardedProxy}");
-        var probe = await ProbeOnceAsync(forwardedProxy, cancellationToken).ConfigureAwait(false);
+        Log(
+            logs,
+            "info",
+            $"开始测试单个代理: {tunnel.ForwardedProxy}，测试接口: {target.Provider}"
+        );
+        var probe = await ProbeOnceAsync(forwardedProxy, target, cancellationToken)
+            .ConfigureAwait(false);
         Log(
             logs,
             "success",
-            $"测试成功，出口 IP: {probe.ExitIp}，耗时: {probe.ElapsedMilliseconds} ms"
+            $"测试成功，出口 IP: {probe.ExitIp}，归属: {BuildGeoSummary(probe)}，耗时: {probe.ElapsedMilliseconds} ms"
         );
 
         return Remember(
@@ -174,6 +186,10 @@ public sealed class ProxyTestService
                 1,
                 0,
                 probe.ExitIp,
+                probe.Country,
+                probe.RegionName,
+                probe.City,
+                probe.TestProvider,
                 null,
                 null,
                 logs
@@ -207,11 +223,15 @@ public sealed class ProxyTestService
 
         var logs = new List<ProxyTestLogEntry>();
         var forwardedProxy = ProxyEndpoint.Parse(fixedProxy.ForwardedProxy);
+        var target = ResolveTestTarget(request?.TestProvider);
         var observedExitIps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var observedUpstreams = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string? previousExitIp = null;
         string? previousUpstream = fixedProxy.LastSelectedUpstreamDisplay;
         string? lastExitIp = null;
+        string? lastCountry = null;
+        string? lastRegionName = null;
+        string? lastCity = null;
         string? lastUpstream = fixedProxy.LastSelectedUpstreamDisplay;
         var successCount = 0;
         var failureCount = 0;
@@ -221,7 +241,7 @@ public sealed class ProxyTestService
         Log(
             logs,
             "info",
-            $"开始测试固定代理: {fixedProxy.ForwardedProxy}，轮数: {iterationCount}，间隔: {intervalSeconds} 秒"
+            $"开始测试固定代理: {fixedProxy.ForwardedProxy}，轮数: {iterationCount}，间隔: {intervalSeconds} 秒，测试接口: {target.Provider}"
         );
 
         for (var attempt = 1; attempt <= iterationCount; attempt++)
@@ -229,10 +249,13 @@ public sealed class ProxyTestService
             try
             {
                 Log(logs, "info", $"第 {attempt}/{iterationCount} 轮开始测试。");
-                var probe = await ProbeOnceAsync(forwardedProxy, cancellationToken)
+                var probe = await ProbeOnceAsync(forwardedProxy, target, cancellationToken)
                     .ConfigureAwait(false);
                 successCount++;
                 lastExitIp = probe.ExitIp;
+                lastCountry = probe.Country;
+                lastRegionName = probe.RegionName;
+                lastCity = probe.City;
                 observedExitIps.Add(probe.ExitIp);
 
                 var snapshot = await snapshotResolver(fixedProxy.Id, cancellationToken)
@@ -273,7 +296,7 @@ public sealed class ProxyTestService
                 Log(
                     logs,
                     "success",
-                    $"第 {attempt}/{iterationCount} 轮成功，出口 IP: {probe.ExitIp}，耗时: {probe.ElapsedMilliseconds} ms"
+                    $"第 {attempt}/{iterationCount} 轮成功，出口 IP: {probe.ExitIp}，归属: {BuildGeoSummary(probe)}，耗时: {probe.ElapsedMilliseconds} ms"
                 );
                 Log(
                     logs,
@@ -319,6 +342,10 @@ public sealed class ProxyTestService
                 successCount,
                 failureCount,
                 lastExitIp,
+                lastCountry,
+                lastRegionName,
+                lastCity,
+                target.Provider,
                 lastUpstream,
                 switchSummary,
                 logs
@@ -330,20 +357,27 @@ public sealed class ProxyTestService
         Guid upstreamId,
         string proxyDisplay,
         ProxyEndpoint proxy,
+        string? requestedProvider,
         CancellationToken cancellationToken
     )
     {
         var testedAt = DateTimeOffset.Now;
+        var target = ResolveTestTarget(requestedProvider);
 
         try
         {
-            var probe = await ProbeOnceAsync(proxy, cancellationToken).ConfigureAwait(false);
+            var probe = await ProbeOnceAsync(proxy, target, cancellationToken)
+                .ConfigureAwait(false);
 
             return new UpstreamProxyTestItemResponse(
                 upstreamId,
                 proxyDisplay,
                 true,
                 probe.ExitIp,
+                probe.Country,
+                probe.RegionName,
+                probe.City,
+                probe.TestProvider,
                 probe.ElapsedMilliseconds,
                 null,
                 testedAt
@@ -356,6 +390,10 @@ public sealed class ProxyTestService
                 proxyDisplay,
                 false,
                 null,
+                null,
+                null,
+                null,
+                target.Provider,
                 null,
                 ex.Message,
                 testedAt
@@ -528,6 +566,7 @@ public sealed class ProxyTestService
 
     private static async Task<ProxyProbeResult> ProbeOnceAsync(
         ProxyEndpoint proxy,
+        TestProbeTarget target,
         CancellationToken cancellationToken
     )
     {
@@ -537,7 +576,7 @@ public sealed class ProxyTestService
         var startedAt = DateTimeOffset.Now;
         var stopwatch = Stopwatch.StartNew();
         using var response = await httpClient
-            .GetAsync(ProbeUri, cancellationToken)
+            .GetAsync(target.Uri, cancellationToken)
             .ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         var body = (
@@ -545,7 +584,153 @@ public sealed class ProxyTestService
         ).Trim();
         stopwatch.Stop();
 
-        return new ProxyProbeResult(body, startedAt, stopwatch.ElapsedMilliseconds);
+        return ParseProbeResult(target.Provider, body, startedAt, stopwatch.ElapsedMilliseconds);
+    }
+
+    private static ProxyProbeResult ParseProbeResult(
+        string provider,
+        string body,
+        DateTimeOffset startedAt,
+        long elapsedMilliseconds
+    )
+    {
+        return provider switch
+        {
+            IfconfigProvider => ParseIfconfigResult(body, provider, startedAt, elapsedMilliseconds),
+            IpifyProvider => ParseIpifyResult(body, provider, startedAt, elapsedMilliseconds),
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(provider),
+                provider,
+                "不支持的测试接口。"
+            ),
+        };
+    }
+
+    private static ProxyProbeResult ParseIfconfigResult(
+        string body,
+        string provider,
+        DateTimeOffset startedAt,
+        long elapsedMilliseconds
+    )
+    {
+        using var document = JsonDocument.Parse(body);
+        var root = document.RootElement;
+        var exitIp = ReadRequiredString(root, "ip");
+        var country = ReadOptionalString(root, "country");
+        var regionName = ReadOptionalString(root, "region_name");
+        var city = ReadOptionalString(root, "city");
+
+        return new ProxyProbeResult(
+            exitIp,
+            country,
+            regionName,
+            city,
+            provider,
+            startedAt,
+            elapsedMilliseconds
+        );
+    }
+
+    private static ProxyProbeResult ParseIpifyResult(
+        string body,
+        string provider,
+        DateTimeOffset startedAt,
+        long elapsedMilliseconds
+    )
+    {
+        if (body.StartsWith('{'))
+        {
+            using var document = JsonDocument.Parse(body);
+            var exitIp = ReadRequiredString(document.RootElement, "ip");
+            return new ProxyProbeResult(
+                exitIp,
+                null,
+                null,
+                null,
+                provider,
+                startedAt,
+                elapsedMilliseconds
+            );
+        }
+
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            throw new InvalidOperationException("测试接口返回为空，无法解析出口 IP。");
+        }
+
+        return new ProxyProbeResult(
+            body,
+            null,
+            null,
+            null,
+            provider,
+            startedAt,
+            elapsedMilliseconds
+        );
+    }
+
+    private static string ReadRequiredString(JsonElement root, string propertyName)
+    {
+        var value = ReadOptionalString(root, propertyName);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new InvalidOperationException($"测试接口响应缺少字段: {propertyName}。");
+        }
+
+        return value;
+    }
+
+    private static string? ReadOptionalString(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind == JsonValueKind.String ? value.GetString()?.Trim() : null;
+    }
+
+    private static string ResolveTestProvider(string? requestedProvider)
+    {
+        if (string.IsNullOrWhiteSpace(requestedProvider))
+        {
+            return IfconfigProvider;
+        }
+
+        var normalized = requestedProvider.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            IfconfigProvider => IfconfigProvider,
+            IpifyProvider => IpifyProvider,
+            _ => throw new ArgumentException(
+                $"不支持的测试接口: {requestedProvider}。可选值: {IfconfigProvider}, {IpifyProvider}。"
+            ),
+        };
+    }
+
+    private TestProbeTarget ResolveTestTarget(string? requestedProvider)
+    {
+        var provider = string.IsNullOrWhiteSpace(requestedProvider)
+            ? _defaultTestProvider
+            : ResolveTestProvider(requestedProvider);
+
+        var uri = provider switch
+        {
+            IfconfigProvider => IfconfigProbeUri,
+            IpifyProvider => IpifyProbeUri,
+            _ => throw new ArgumentException($"不支持的测试接口: {provider}。"),
+        };
+
+        return new TestProbeTarget(provider, uri);
+    }
+
+    private static string BuildGeoSummary(ProxyProbeResult probe)
+    {
+        var parts = new[] { probe.Country, probe.RegionName, probe.City }
+            .Where(static item => !string.IsNullOrWhiteSpace(item))
+            .ToArray();
+
+        return parts.Length > 0 ? string.Join(" / ", parts) : "未知";
     }
 
     private static HttpMessageHandler CreateHandler(ProxyEndpoint proxy)
@@ -602,7 +787,13 @@ public sealed class ProxyTestService
 
     private sealed record ProxyProbeResult(
         string ExitIp,
+        string? Country,
+        string? RegionName,
+        string? City,
+        string TestProvider,
         DateTimeOffset StartedAt,
         long ElapsedMilliseconds
     );
+
+    private sealed record TestProbeTarget(string Provider, Uri Uri);
 }

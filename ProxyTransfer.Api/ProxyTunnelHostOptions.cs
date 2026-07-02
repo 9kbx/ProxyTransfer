@@ -32,4 +32,6 @@ public sealed class ProxyTunnelHostOptions
 
     public string UpstreamPoolTestHistoryFilePath { get; set; } =
         "App_Data/upstream-pool-test-history.json";
+
+    public string DefaultTestProvider { get; set; } = "ifconfig";
 }

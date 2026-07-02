@@ -31,7 +31,11 @@ public sealed record StartProxyRequest(
 
 public sealed record StopBatchRequest(string BatchId);
 
-public sealed record BatchTunnelTestRequest(string BatchId, bool RunningOnly = true);
+public sealed record BatchTunnelTestRequest(
+    string BatchId,
+    bool RunningOnly = true,
+    string? TestProvider = null
+);
 
 public sealed record ProxyTunnelResponse(
     Guid Id,
@@ -120,7 +124,8 @@ public sealed record DeleteUpstreamPoolProxiesResponse(
 
 public sealed record UpstreamPoolTestRequest(
     Guid? UpstreamId = null,
-    IReadOnlyList<Guid>? UpstreamIds = null
+    IReadOnlyList<Guid>? UpstreamIds = null,
+    string? TestProvider = null
 );
 
 public sealed record UpstreamProxyTestItemResponse(
@@ -128,6 +133,10 @@ public sealed record UpstreamProxyTestItemResponse(
     string ProxyDisplay,
     bool Success,
     string? ExitIp,
+    string? Country,
+    string? RegionName,
+    string? City,
+    string? TestProvider,
     long? ElapsedMilliseconds,
     string? ErrorMessage,
     DateTimeOffset TestedAt
@@ -178,7 +187,13 @@ public sealed record FixedProxyResponse(
     string? LastError
 );
 
-public sealed record ProxyTestRequest(int? IterationCount, int? IntervalSeconds);
+public sealed record ProxyTestRequest(
+    int? IterationCount,
+    int? IntervalSeconds,
+    string? TestProvider = null
+);
+
+public sealed record TunnelTestRequest(string? TestProvider = null);
 
 public sealed record ProxyTestLogEntry(DateTimeOffset Timestamp, string Level, string Message);
 
@@ -203,6 +218,10 @@ public sealed record ProxyTestResponse(
     int SuccessCount,
     int FailureCount,
     string? LastExitIp,
+    string? LastCountry,
+    string? LastRegionName,
+    string? LastCity,
+    string? TestProvider,
     string? LastSelectedUpstreamDisplay,
     ProxyTestSwitchSummary? SwitchSummary,
     IReadOnlyList<ProxyTestLogEntry> Logs

@@ -84,6 +84,10 @@ type UpstreamProxyTestItem = {
   proxyDisplay: string
   success: boolean
   exitIp: string | null
+  country: string | null
+  regionName: string | null
+  city: string | null
+  testProvider: string | null
   elapsedMilliseconds: number | null
   errorMessage: string | null
   testedAt: string
@@ -163,6 +167,10 @@ type ProxyTestResult = {
   successCount: number
   failureCount: number
   lastExitIp: string | null
+  lastCountry: string | null
+  lastRegionName: string | null
+  lastCity: string | null
+  testProvider: string | null
   lastSelectedUpstreamDisplay: string | null
   switchSummary: ProxyTestSwitchSummary | null
   logs: ProxyTestLogRecord[]
@@ -176,6 +184,13 @@ type PortRangeResponse = {
 
 type ViewMode = 'classic' | 'fixed'
 type SelectionPolicy = 'sticky' | 'round-robin' | 'least-failures'
+type TestProvider = 'ifconfig' | 'ipify'
+
+type TestProviderOption = {
+  value: TestProvider
+  label: string
+  endpoint: string
+}
 
 type FloatingNavItem = {
   id: string
@@ -202,6 +217,19 @@ const selectionPolicyOptions: Array<{
     value: 'least-failures',
     label: '最少失败优先',
     description: '优先选择当前失败次数更少的健康上游。',
+  },
+]
+
+const testProviderOptions: TestProviderOption[] = [
+  {
+    value: 'ifconfig',
+    label: 'ifconfig（含地区信息）',
+    endpoint: 'https://ifconfig.co/json',
+  },
+  {
+    value: 'ipify',
+    label: 'ipify（仅 IP）',
+    endpoint: 'https://api.ipify.org/',
   },
 ]
 
@@ -274,6 +302,8 @@ const fixedTestForm = reactive({
   iterationCount: '6',
   intervalSeconds: '5',
 })
+
+const selectedTestProvider = ref<TestProvider>('ifconfig')
 
 const portRange = ref<PortRangeResponse | null>(null)
 
@@ -431,8 +461,25 @@ const fixedProxyHint = computed(() => {
   return `固定入口地址保持不变，系统会从池 ${fixedProxyForm.poolId} 中按粘性会话动态切换健康上游。`
 })
 
+const selectedTestProviderMeta = computed(
+  () => testProviderOptions.find((item) => item.value === selectedTestProvider.value) ?? testProviderOptions[0],
+)
+
 function formatSelectionPolicy(policy: string | null | undefined): string {
   return selectionPolicyOptions.find((item) => item.value === policy)?.label ?? (policy || '未知')
+}
+
+function formatProbeLocation(ip: string | null, country?: string | null, regionName?: string | null, city?: string | null): string {
+  if (!ip) {
+    return '未获取'
+  }
+
+  const parts = [country, regionName, city].filter((item) => item && item.trim().length > 0)
+  if (!parts.length) {
+    return ip
+  }
+
+  return `${ip} / ${parts.join(' / ')}`
 }
 
 function parseProxyTargets(proxyText: string): string[] {
@@ -694,7 +741,11 @@ async function testBatch(batchId: string) {
   await withBusy(async () => {
     const response = await apiFetch<BatchTunnelTestResponse>('/api/tunnels/test-batch', {
       method: 'POST',
-      body: JSON.stringify({ batchId, runningOnly: true }),
+      body: JSON.stringify({
+        batchId,
+        runningOnly: true,
+        testProvider: selectedTestProvider.value,
+      }),
     })
 
     await loadTestHistory('single')
@@ -942,7 +993,7 @@ async function testTunnel(item: TunnelRecord) {
   await withBusy(async () => {
     const result = await apiFetch<ProxyTestResult>(`/api/tunnels/${item.id}/test`, {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify({ testProvider: selectedTestProvider.value }),
     })
 
     rememberTestResult(result)
@@ -961,6 +1012,7 @@ async function testFixedProxy(item: FixedProxyRecord) {
       body: JSON.stringify({
         iterationCount: fixedTestForm.iterationCount ? Number(fixedTestForm.iterationCount) : null,
         intervalSeconds: fixedTestForm.intervalSeconds ? Number(fixedTestForm.intervalSeconds) : null,
+        testProvider: selectedTestProvider.value,
       }),
     })
 
@@ -1009,7 +1061,7 @@ async function testSelectedPool() {
   await withBusy(async () => {
     const response = await apiFetch<UpstreamPoolTestResponse>(`/api/upstream-pools/${selectedPoolId.value}/test`, {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify({ testProvider: selectedTestProvider.value }),
     })
 
     upstreamPoolRetestComparison.value = null
@@ -1024,7 +1076,10 @@ async function testUpstreamProxy(item: UpstreamProxyRecord) {
   await withBusy(async () => {
     const response = await apiFetch<UpstreamPoolTestResponse>(`/api/upstream-pools/${item.poolId}/test`, {
       method: 'POST',
-      body: JSON.stringify({ upstreamId: item.id }),
+      body: JSON.stringify({
+        upstreamId: item.id,
+        testProvider: selectedTestProvider.value,
+      }),
     })
 
     const result = response.items[0]
@@ -1049,7 +1104,10 @@ async function retestFailedUpstreamProxies() {
   await withBusy(async () => {
     const response = await apiFetch<UpstreamPoolTestResponse>(`/api/upstream-pools/${selectedPoolId.value}/test`, {
       method: 'POST',
-      body: JSON.stringify({ upstreamIds: selectedUpstreamPoolFailureItems.value.map((item) => item.upstreamId) }),
+      body: JSON.stringify({
+        upstreamIds: selectedUpstreamPoolFailureItems.value.map((item) => item.upstreamId),
+        testProvider: selectedTestProvider.value,
+      }),
     })
 
     rememberUpstreamPoolTest(response)
@@ -1280,6 +1338,15 @@ onMounted(async () => {
     <section class="notice-bar">
       <p v-if="statusMessage" class="notice success">{{ statusMessage }}</p>
       <p v-if="errorMessage" class="notice danger">{{ errorMessage }}</p>
+      <label class="compact-field">
+        <span>测试接口</span>
+        <select v-model="selectedTestProvider">
+          <option v-for="item in testProviderOptions" :key="item.value" :value="item.value">
+            {{ item.label }}
+          </option>
+        </select>
+        <small class="field-help">当前: {{ selectedTestProviderMeta.endpoint }}</small>
+      </label>
       <button class="ghost" :disabled="busy" @click="withBusy(refreshActiveView)">{{ busy ? '刷新中...' : '刷新列表' }}</button>
     </section>
 
@@ -1511,7 +1578,8 @@ onMounted(async () => {
           <div class="test-console__summary">
             <p>时间: {{ formatTime(selectedClassicTestResult.completedAt) }}</p>
             <p>代理: {{ selectedClassicTestResult.forwardedProxy ?? selectedClassicTestResult.proxyDisplay }}</p>
-            <p>出口 IP: {{ selectedClassicTestResult.lastExitIp ?? '未知' }}</p>
+            <p>测试接口: {{ selectedClassicTestResult.testProvider ?? '默认' }}</p>
+            <p>出口归属: {{ formatProbeLocation(selectedClassicTestResult.lastExitIp, selectedClassicTestResult.lastCountry, selectedClassicTestResult.lastRegionName, selectedClassicTestResult.lastCity) }}</p>
             <p>最近上游: {{ selectedClassicTestResult.lastSelectedUpstreamDisplay ?? '不适用' }}</p>
           </div>
           <div class="test-log-list">
@@ -1791,7 +1859,8 @@ onMounted(async () => {
                     <span v-if="selectedUpstreamPoolRetestLookup[item.id] === 'recovered'" class="badge healthy">已恢复</span>
                     <span v-else-if="selectedUpstreamPoolRetestLookup[item.id] === 'still-failed'" class="badge unhealthy">仍失败</span>
                     <p>时间: {{ formatTime(selectedUpstreamPoolTestLookup[item.id].testedAt) }}</p>
-                    <p>出口: {{ selectedUpstreamPoolTestLookup[item.id].exitIp ?? '未获取' }}</p>
+                    <p>测试接口: {{ selectedUpstreamPoolTestLookup[item.id].testProvider ?? '默认' }}</p>
+                    <p>出口归属: {{ formatProbeLocation(selectedUpstreamPoolTestLookup[item.id].exitIp, selectedUpstreamPoolTestLookup[item.id].country, selectedUpstreamPoolTestLookup[item.id].regionName, selectedUpstreamPoolTestLookup[item.id].city) }}</p>
                     <p v-if="selectedUpstreamPoolTestLookup[item.id].elapsedMilliseconds !== null">耗时: {{ selectedUpstreamPoolTestLookup[item.id].elapsedMilliseconds }} ms</p>
                     <p v-if="selectedUpstreamPoolTestLookup[item.id].errorMessage" class="inline-error">{{ selectedUpstreamPoolTestLookup[item.id].errorMessage }}</p>
                   </template>
@@ -1930,7 +1999,8 @@ onMounted(async () => {
           <div class="test-console__summary">
             <p>时间: {{ formatTime(selectedFixedTestResult.completedAt) }}</p>
             <p>代理: {{ selectedFixedTestResult.forwardedProxy ?? selectedFixedTestResult.proxyDisplay }}</p>
-            <p>出口 IP: {{ selectedFixedTestResult.lastExitIp ?? '未知' }}</p>
+            <p>测试接口: {{ selectedFixedTestResult.testProvider ?? '默认' }}</p>
+            <p>出口归属: {{ formatProbeLocation(selectedFixedTestResult.lastExitIp, selectedFixedTestResult.lastCountry, selectedFixedTestResult.lastRegionName, selectedFixedTestResult.lastCity) }}</p>
             <p>最近上游: {{ selectedFixedTestResult.lastSelectedUpstreamDisplay ?? '未知' }}</p>
           </div>
           <div v-if="selectedFixedTestResult.switchSummary" class="switch-grid">

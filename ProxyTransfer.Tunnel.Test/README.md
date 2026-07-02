@@ -17,7 +17,11 @@
 - `http://host:port`
 - `socks5://host:port`
 
-测试方式是通过代理访问 `https://api.ipify.org/`，确认请求是否成功以及出口 IP 是什么。
+测试方式是通过代理访问第三方 IP 探测接口，默认使用 `https://ifconfig.co/json`，也可以通过参数切换到 `https://api.ipify.org/`。
+
+- 默认测试接口: `ifconfig`（支持输出 `ip/country/region_name/city`）
+- 可选测试接口: `ipify`（仅输出 `ip`）
+- 切换参数: `--provider ifconfig|ipify`
 
 ## 使用方式
 
@@ -47,6 +51,12 @@ dotnet run -- single
 
 ```bash
 dotnet run -- single http://127.0.0.1:40000
+
+显式指定测试接口（默认 ifconfig）：
+
+```bash
+dotnet run -- single http://127.0.0.1:40000 --provider ipify
+```
 ```
 
 或者指定其它文件路径：
@@ -83,6 +93,12 @@ dotnet run -- fixed http://127.0.0.1:1234
 
 ```bash
 dotnet run -- fixed http://127.0.0.1:1234 --api-base-url http://127.0.0.1:5080
+
+指定测试接口：
+
+```bash
+dotnet run -- fixed http://127.0.0.1:1234 --provider ifconfig
+```
 ```
 
 如果你已经知道固定入口的 ID，也可以传入，以避免通过 `forwardedProxy` 反查：
@@ -107,6 +123,12 @@ dotnet run -- fixed http://127.0.0.1:1234 --count 12 --interval-seconds 10
 
 ```bash
 dotnet run -- multi socks5://127.0.0.1:12345
+```
+
+多线程测试并切换接口：
+
+```bash
+dotnet run -- multi socks5://127.0.0.1:12345 --provider ipify
 ```
 
 指定线程数量

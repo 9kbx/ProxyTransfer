@@ -114,6 +114,7 @@ internal static class UpstreamPoolEndpoints
                                 upstream.Id,
                                 upstream.ProxyDisplay,
                                 endpoint,
+                                request?.TestProvider,
                                 cancellationToken
                             )
                             .ConfigureAwait(false);
